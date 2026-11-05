@@ -1,9 +1,14 @@
 [package]
 name = "ai-server"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
 tokio.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+axum.workspace = true
+dotenvy.workspace = true
 ai-core.workspace = true
