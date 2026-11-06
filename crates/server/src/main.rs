@@ -1,21 +1,25 @@
+mod state;
+
 use ai_core::SystemInfo;
-use axum::{Json, Router, routing::get};
+use axum::{Json, Router, extract::State, routing::get};
 use serde::Serialize;
 use std::net::SocketAddr;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-mod state;
+use crate::state::{AppConfig, AppState};
 
 #[derive(Serialize)]
 struct HealthResponse {
     status: &'static str,
+    environment: String,
     system: SystemInfo,
 }
 
-async fn health_check() -> Json<HealthResponse> {
+async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
     tracing::debug!("Health check endpoint called");
     Json(HealthResponse {
         status: "ok",
+        environment: state.config.app_env.clone(),
         system: SystemInfo::current(),
     })
 }
@@ -29,9 +33,15 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let app = Router::new().route("/api/health", get(health_check));
+    let config = AppConfig::from_env();
+    let port = config.port;
+    let state = AppState::new(config);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    let app = Router::new()
+        .route("/api/health", get(health_check))
+        .with_state(state);
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
     tracing::info!("server listening on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr)

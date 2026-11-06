@@ -2,12 +2,9 @@
 **/*.rs.bk
 *.pdb
 
+# 环境变量与密钥
+.env
+
 # 学习计划与每日打卡表
 AI_FullStack_SaaS_1Year_Plan.md
 Month1_Daily_45Min_Checklist.md
-
-
-APP_ENV=development
-PORT=3000
-LLM_API_BASE=https://api.deepseek.com/v1
-LLM_API_KEY=sk-your-key-here

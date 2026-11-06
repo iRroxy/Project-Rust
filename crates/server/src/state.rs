@@ -1,6 +1,7 @@
 use std::{env, sync::Arc};
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct AppConfig {
     pub app_env: String,
     pub port: u16,
