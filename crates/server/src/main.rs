@@ -1,5 +1,7 @@
+mod error;
 mod state;
 
+use crate::error::AppResult;
 use ai_core::SystemInfo;
 use axum::{Json, Router, extract::State, routing::get};
 use serde::Serialize;
@@ -15,13 +17,13 @@ struct HealthResponse {
     system: SystemInfo,
 }
 
-async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
+async fn health_check(State(state): State<AppState>) -> AppResult<Json<HealthResponse>> {
     tracing::debug!("Health check endpoint called");
-    Json(HealthResponse {
+    Ok(Json(HealthResponse {
         status: "ok",
         environment: state.config.app_env.clone(),
         system: SystemInfo::current(),
-    })
+    }))
 }
 
 #[tokio::main]

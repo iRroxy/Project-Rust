@@ -12,3 +12,5 @@ tracing-subscriber.workspace = true
 axum.workspace = true
 dotenvy.workspace = true
 ai-core.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true

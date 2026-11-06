@@ -19,5 +19,7 @@ anyhow = "1"
 tracing = "0.1"
 axum = "0.8"
 dotenvy = "0.15"
+thiserror = "2"
+
 
 ai-core = { path = "crates/core" }
