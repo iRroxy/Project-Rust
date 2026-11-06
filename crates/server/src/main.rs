@@ -46,9 +46,7 @@ struct EchoResponse {
 async fn echo(Json(payload): Json<EchoRequest>) -> AppResult<Json<EchoResponse>> {
     let trimmed = payload.message.trim();
     if trimmed.is_empty() {
-        return Err(error::AppError::BadRequest(
-            "message cannot be empty".to_string(),
-        ));
+        return Err(AppError::BadRequest("message cannot be empty".to_string()));
     }
 
     Ok(Json(EchoResponse {
