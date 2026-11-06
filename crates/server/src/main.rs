@@ -4,6 +4,8 @@ use serde::Serialize;
 use std::net::SocketAddr;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
+mod state;
+
 #[derive(Serialize)]
 struct HealthResponse {
     status: &'static str,
