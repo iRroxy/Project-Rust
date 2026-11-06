@@ -14,3 +14,4 @@ dotenvy.workspace = true
 ai-core.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
+tower-http.workspace = true

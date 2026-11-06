@@ -1,11 +1,17 @@
 mod error;
 mod state;
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use ai_core::SystemInfo;
-use axum::{Json, Router, extract::State, routing::get};
-use serde::Serialize;
-use std::net::SocketAddr;
+use axum::{
+    Json, Router,
+    extract::State,
+    http::{HeaderValue, Method, StatusCode, header},
+    routing::{get, post},
+};
+use serde::{Deserialize, Serialize};
+use std::{net::SocketAddr, time::Duration};
+use tower_http::{cors::CorsLayer, timeout::TimeoutLayer, trace::TraceLayer};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::state::{AppConfig, AppState};
@@ -26,6 +32,31 @@ async fn health_check(State(state): State<AppState>) -> AppResult<Json<HealthRes
     }))
 }
 
+#[derive(Deserialize)]
+struct EchoRequest {
+    message: String,
+}
+
+#[derive(Serialize)]
+struct EchoResponse {
+    reply: String,
+    length: usize,
+}
+
+async fn echo(Json(payload): Json<EchoRequest>) -> AppResult<Json<EchoResponse>> {
+    let trimmed = payload.message.trim();
+    if trimmed.is_empty() {
+        return Err(error::AppError::BadRequest(
+            "message cannot be empty".to_string(),
+        ));
+    }
+
+    Ok(Json(EchoResponse {
+        reply: format!("Echo: {}", trimmed),
+        length: trimmed.chars().count(),
+    }))
+}
+
 #[tokio::main]
 async fn main() {
     let _ = dotenvy::dotenv();
@@ -39,8 +70,20 @@ async fn main() {
     let port = config.port;
     let state = AppState::new(config);
 
+    let cors = CorsLayer::new()
+        .allow_origin("http://localhost:3000".parse::<HeaderValue>().unwrap())
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
+
     let app = Router::new()
         .route("/api/health", get(health_check))
+        .route("/api/echo", post(echo))
+        .layer(TraceLayer::new_for_http())
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(30),
+        ))
+        .layer(cors)
         .with_state(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
