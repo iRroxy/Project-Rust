@@ -91,22 +91,7 @@ async fn main() {
     let port = config.port;
     let state = AppState::new(config);
 
-    let cors = CorsLayer::new()
-        .allow_origin("http://localhost:3000".parse::<HeaderValue>().unwrap())
-        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
-        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
-
-    let app = Router::new()
-        .route("/api/health", get(health_check))
-        .route("/api/echo", post(echo))
-        .route("/api/chat", post(chat))
-        .layer(TraceLayer::new_for_http())
-        .layer(TimeoutLayer::with_status_code(
-            StatusCode::REQUEST_TIMEOUT,
-            Duration::from_secs(30),
-        ))
-        .layer(cors)
-        .with_state(state);
+    let app = build_app(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     tracing::info!("server listening on http://{}", addr);
@@ -116,4 +101,95 @@ async fn main() {
         .expect("Failed to bind TCP listener");
 
     axum::serve(listener, app).await.expect("Server error");
+}
+
+pub fn build_app(state: AppState) -> Router {
+    let cors = CorsLayer::new()
+        .allow_origin("http://localhost:3000".parse::<HeaderValue>().unwrap())
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
+
+    Router::new()
+        .route("/api/health", get(health_check))
+        .route("/api/echo", post(echo))
+        .route("/api/chat", post(chat))
+        .layer(TraceLayer::new_for_http())
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(30),
+        ))
+        .layer(cors)
+        .with_state(state)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::Body, http::Request, response};
+    use http_body_util::BodyExt;
+    use tokio::net::windows::named_pipe::PipeMode::Byte;
+    use tower::ServiceExt;
+
+    fn test_app() -> Router {
+        let config = AppConfig {
+            app_env: "test".to_string(),
+            port: 0,
+            llm_api_base: "https://api.deepseek.com/v1".to_string(),
+            llm_api_key: String::new(),
+            llm_model: "deepseek-chat".to_string(),
+        };
+        build_app(AppState::new(config))
+    }
+
+    #[tokio::test]
+    async fn test_health_check() {
+        let app = test_app();
+        let req = Request::builder()
+            .uri("/api/health")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_echo_and_bad_request() {
+        let app = test_app();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/echo")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{message: "Hello week 1"}"#))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(json["reply"], "Echo: Hello week 1");
+        assert_eq!(json["length"], 12);
+
+        let bad_req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/echo")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"message": "   "}"#))
+            .unwrap();
+        let bad_resp = app.oneshot(bad_req).await.unwrap();
+        assert_eq!(bad_resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_chat_mock_response() {
+        let app = test_app();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/chat")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"prompt": "Hi Rust"}"#))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
 }
