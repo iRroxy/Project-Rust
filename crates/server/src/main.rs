@@ -124,9 +124,8 @@ pub fn build_app(state: AppState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{body::Body, http::Request, response};
+    use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
-    use tokio::net::windows::named_pipe::PipeMode::Byte;
     use tower::ServiceExt;
 
     fn test_app() -> Router {
@@ -159,7 +158,7 @@ mod tests {
             .method(Method::POST)
             .uri("/api/echo")
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{message: "Hello week 1"}"#))
+            .body(Body::from(r#"{"message": "Hello week 1"}"#))
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
