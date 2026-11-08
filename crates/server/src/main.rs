@@ -55,6 +55,29 @@ async fn echo(Json(payload): Json<EchoRequest>) -> AppResult<Json<EchoResponse>>
     }))
 }
 
+#[derive(Deserialize)]
+struct ChatRequest {
+    prompt: String,
+}
+
+#[derive(Serialize)]
+struct ChatResponse {
+    reply: String,
+}
+
+async fn chat(
+    State(state): State<AppState>,
+    Json(payload): Json<ChatRequest>,
+) -> AppResult<Json<ChatResponse>> {
+    let prompt = payload.prompt.trim();
+    if prompt.is_empty() {
+        return Err(AppError::BadRequest("prompt cannot be empty".to_string()));
+    }
+
+    let reply = state.llm.chat_completion(prompt).await?;
+    Ok(Json(ChatResponse { reply }))
+}
+
 #[tokio::main]
 async fn main() {
     let _ = dotenvy::dotenv();
@@ -76,6 +99,7 @@ async fn main() {
     let app = Router::new()
         .route("/api/health", get(health_check))
         .route("/api/echo", post(echo))
+        .route("/api/chat", post(chat))
         .layer(TraceLayer::new_for_http())
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
