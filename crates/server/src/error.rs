@@ -16,6 +16,9 @@ pub enum AppError {
 
     #[error("Internal server error")]
     Internal(#[from] anyhow::Error),
+
+    #[error("Database error")]
+    Database(#[from] sqlx::Error),
 }
 
 #[derive(Serialize)]
@@ -32,6 +35,19 @@ struct ErrorDetail {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, code, message) = match &self {
+            AppError::Database(sqlx::Error::RowNotFound) => (
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+                "resource not found".to_string(),
+            ),
+            AppError::Database(err) => {
+                tracing::error!(error =?err, "Database error occureed");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    "A database error occurred".to_string(),
+                )
+            }
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, "NOT_FOUND", msg.clone()),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "BAD_REQUEST", msg.clone()),
             AppError::Internal(err) => {
