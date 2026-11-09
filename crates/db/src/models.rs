@@ -16,6 +16,6 @@ pub struct Message {
     pub conversation_id: Uuid,
     pub role: String,
     pub content: String,
-    pub token_count: Option<u32>,
+    pub token_count: Option<i32>,
     pub created_at: DateTime<Utc>,
 }
