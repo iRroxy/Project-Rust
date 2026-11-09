@@ -17,6 +17,7 @@ thiserror.workspace = true
 tower-http.workspace = true
 ai-db.workspace = true
 sqlx.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

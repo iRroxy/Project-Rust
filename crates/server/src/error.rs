@@ -41,7 +41,7 @@ impl IntoResponse for AppError {
                 "resource not found".to_string(),
             ),
             AppError::Database(err) => {
-                tracing::error!(error =?err, "Database error occureed");
+                tracing::error!(error =?err, "Database error occurred");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "DATABASE_ERROR",

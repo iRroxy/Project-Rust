@@ -1,4 +1,5 @@
 pub mod conversations;
+pub mod message;
 pub mod models;
 
 pub use sqlx::PgPool;
