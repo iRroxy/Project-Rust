@@ -221,13 +221,25 @@ mod tests {
         let conv = ai_db::conversations::create_conversation(&pool, Some("api test"))
             .await
             .unwrap();
-        ai_db::message::save_message(&pool, conv.id, "user", "hi", None)
+        let user = ai_db::message::save_message(&pool, conv.id, "user", "hi", None)
             .await
             .unwrap();
-        ai_db::message::save_message(&pool, conv.id, "assistant", "hello!", Some(3))
+        let assistant =
+            ai_db::message::save_message(&pool, conv.id, "assistant", "hello!", Some(3))
+                .await
+                .unwrap();
+        for (id, seconds) in [(user.id, 0), (assistant.id, 1)] {
+            sqlx::query(
+                "UPDATE messages SET created_at = TIMESTAMPTZ '2026-01-01 00:00:00+00' \
+                 + $2::int * INTERVAL '1 second' WHERE id = $1",
+            )
+            .bind(id)
+            .bind(seconds)
+            .execute(&pool)
             .await
             .unwrap();
-        let app = test_app_with_pool(pool);
+        }
+        let app = test_app_with_pool(pool.clone());
 
         // 列表
         let req = Request::builder()
@@ -238,7 +250,8 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json.as_array().unwrap().len(), 1);
+        assert_eq!(json[0]["id"], conv.id.to_string());
+        assert_eq!(json[0]["title"], "api test");
 
         // 消息历史(正序)
         let req = Request::builder()
@@ -251,13 +264,96 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json[0]["role"], "user");
         assert_eq!(json[1]["content"], "hello!");
+        assert_eq!(json[0]["content"], "hi");
+        assert_eq!(json[0]["token_count"], serde_json::Value::Null);
+        assert_eq!(json[1]["role"], "assistant");
+        assert_eq!(json[1]["token_count"], 3);
 
         // 不存在的会话 -> 404
         let req = Request::builder()
             .uri("/api/conversations/00000000-0000-0000-0000-000000000000/messages")
             .body(Body::empty())
             .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], "NOT_FOUND");
+
+        let req = Request::builder()
+            .method(Method::DELETE)
+            .uri(format!("/api/conversations/{}", conv.id))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM messages WHERE conversation_id = $1")
+                .bind(conv.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining, 0);
+
+        let req = Request::builder()
+            .uri(format!("/api/conversations/{}/messages", conv.id))
+            .body(Body::empty())
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn test_message_history_limits_and_isolation(pool: ai_db::PgPool) {
+        let conv = ai_db::conversations::create_conversation(&pool, Some("history"))
+            .await
+            .unwrap();
+        let other = ai_db::conversations::create_conversation(&pool, Some("other"))
+            .await
+            .unwrap();
+        let app = test_app_with_pool(pool.clone());
+
+        let req = Request::builder()
+            .uri(format!("/api/conversations/{}/messages", conv.id))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let empty: Vec<ai_db::models::Message> = serde_json::from_slice(&body).unwrap();
+        assert!(empty.is_empty());
+
+        sqlx::query(
+            "INSERT INTO messages (conversation_id, role, content, created_at) \
+             SELECT $1, 'user', i::text, TIMESTAMPTZ '2026-01-01 00:00:00+00' \
+             + i * INTERVAL '1 second' FROM generate_series(1, 205) AS i",
+        )
+        .bind(conv.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        ai_db::message::save_message(&pool, other.id, "user", "private to other", None)
+            .await
+            .unwrap();
+
+        for (query, first) in [
+            ("", 156),
+            ("?limit=3", 203),
+            ("?limit=0", 205),
+            ("?limit=999", 6),
+        ] {
+            let req = Request::builder()
+                .uri(format!("/api/conversations/{}/messages{query}", conv.id))
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{query}");
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let messages: Vec<ai_db::models::Message> = serde_json::from_slice(&body).unwrap();
+            let contents: Vec<_> = messages.iter().map(|m| m.content.as_str()).collect();
+            let expected: Vec<_> = (first..=205).map(|i| i.to_string()).collect();
+            assert_eq!(contents, expected, "{query}");
+            assert!(messages.iter().all(|m| m.conversation_id == conv.id));
+        }
     }
 }

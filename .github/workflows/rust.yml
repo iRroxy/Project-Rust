@@ -38,9 +38,9 @@ jobs:
       env:
         PGPASSWORD: ai_saas_dev
       run: |
-        for file in $(ls -1 migrations/*.sql | sort); do
+        for file in migrations/*.sql; do
           echo "Applying $file..."
-          psql -h localhost -U ai_saas -d ai_saas -f "$file"
+          psql -v ON_ERROR_STOP=1 -h localhost -U ai_saas -d ai_saas -f "$file"
         done
 
     - name: Build
