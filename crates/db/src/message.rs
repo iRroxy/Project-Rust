@@ -66,5 +66,11 @@ mod test {
         let recent = get_recent_messages(&pool, conv.id, 3).await.unwrap();
         let contents: Vec<_> = recent.iter().map(|m| m.content.as_str()).collect();
         assert_eq!(contents, ["msg 3", "msg 4", "msg 5"]);
+
+        assert!(
+            save_message(&pool, conv.id, "hacker", "x", None)
+                .await
+                .is_err()
+        );
     }
 }

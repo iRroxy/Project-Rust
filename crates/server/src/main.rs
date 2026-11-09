@@ -1,3 +1,4 @@
+mod conversations;
 mod error;
 mod state;
 
@@ -7,7 +8,7 @@ use axum::{
     Json, Router,
     extract::State,
     http::{HeaderValue, Method, StatusCode, header},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, time::Duration};
@@ -117,6 +118,18 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/health", get(health_check))
         .route("/api/echo", post(echo))
         .route("/api/chat", post(chat))
+        .route(
+            "/api/conversations",
+            get(conversations::list_conversations).post(conversations::create_conversation),
+        )
+        .route(
+            "/api/conversations/{id}",
+            delete(conversations::delete_conversation),
+        )
+        .route(
+            "/api/conversations/{id}/messages",
+            get(conversations::list_messages),
+        )
         .layer(TraceLayer::new_for_http())
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
@@ -125,6 +138,7 @@ pub fn build_app(state: AppState) -> Router {
         .layer(cors)
         .with_state(state)
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +147,11 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_app() -> Router {
+        let db = ai_db::connect_lazy("postgres://test:test@localhost:5432/test").unwrap();
+        test_app_with_pool(db)
+    }
+
+    fn test_app_with_pool(db: ai_db::PgPool) -> Router {
         let config = AppConfig {
             app_env: "test".to_string(),
             port: 0,
@@ -141,7 +160,6 @@ mod tests {
             llm_model: "deepseek-chat".to_string(),
             database_url: "postgres://test:test@localhost:5432/test".to_string(),
         };
-        let db = ai_db::connect_lazy(&config.database_url).unwrap();
         build_app(AppState::new(config, db))
     }
 
@@ -196,5 +214,50 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn test_conversation_and_messages_api(pool: ai_db::PgPool) {
+        let conv = ai_db::conversations::create_conversation(&pool, Some("api test"))
+            .await
+            .unwrap();
+        ai_db::message::save_message(&pool, conv.id, "user", "hi", None)
+            .await
+            .unwrap();
+        ai_db::message::save_message(&pool, conv.id, "assistant", "hello!", Some(3))
+            .await
+            .unwrap();
+        let app = test_app_with_pool(pool);
+
+        // 列表
+        let req = Request::builder()
+            .uri("/api/conversations")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.as_array().unwrap().len(), 1);
+
+        // 消息历史(正序)
+        let req = Request::builder()
+            .uri(format!("/api/conversations/{}/messages", conv.id))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json[0]["role"], "user");
+        assert_eq!(json[1]["content"], "hello!");
+
+        // 不存在的会话 -> 404
+        let req = Request::builder()
+            .uri("/api/conversations/00000000-0000-0000-0000-000000000000/messages")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

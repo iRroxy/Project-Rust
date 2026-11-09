@@ -30,6 +30,19 @@ pub async fn list_conversations(pool: &PgPool) -> Result<Vec<Conversation>, sqlx
     .fetch_all(pool)
     .await
 }
+
+pub async fn get_conversation(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<Option<Conversation>, sqlx::Error> {
+    sqlx::query_as!(
+        Conversation,
+        "SELECT id, title, created_at FROM conversations WHERE id = $1",
+        id
+    )
+    .fetch_optional(pool)
+    .await
+}
 pub async fn delete_conversation(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
     let result = sqlx::query!("DELETE FROM conversations WHERE id = $1", id)
         .execute(pool)

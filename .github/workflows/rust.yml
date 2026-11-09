@@ -11,12 +11,40 @@ env:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: ai_saas
+          POSTGRES_PASSWORD: ai_saas_dev
+          POSTGRES_DB: ai_saas
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://ai_saas:ai_saas_dev@localhost:5432/ai_saas
 
     steps:
     - uses: actions/checkout@v4
+
+    - name: Migrate database schema
+      env:
+        PGPASSWORD: ai_saas_dev
+      run: |
+        for file in $(ls -1 migrations/*.sql | sort); do
+          echo "Applying $file..."
+          psql -h localhost -U ai_saas -d ai_saas -f "$file"
+        done
+
     - name: Build
       run: cargo build --verbose
+
     - name: Run tests
       run: cargo test --verbose
