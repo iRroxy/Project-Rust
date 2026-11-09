@@ -89,7 +89,11 @@ async fn main() {
 
     let config = AppConfig::from_env();
     let port = config.port;
-    let state = AppState::new(config);
+    let db = ai_db::connect(&config.database_url)
+        .await
+        .expect("Failed to connect to PostgreSQL");
+    tracing::info!("database pool ready");
+    let state = AppState::new(config, db);
 
     let app = build_app(state);
 
@@ -135,8 +139,10 @@ mod tests {
             llm_api_base: "https://api.deepseek.com/v1".to_string(),
             llm_api_key: String::new(),
             llm_model: "deepseek-chat".to_string(),
+            database_url: "postgres://test:test@localhost:5432/test".to_string(),
         };
-        build_app(AppState::new(config))
+        let db = ai_db::connect_lazy(&config.database_url).unwrap();
+        build_app(AppState::new(config, db))
     }
 
     #[tokio::test]
