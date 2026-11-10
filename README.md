@@ -1,6 +1,6 @@
 # Project Rust
 
-按每日实战计划构建 Rust + Next.js AI SaaS。当前已实现 Day 13 多轮聊天持久化，并具备 Day 14 的 SQLx 离线编译能力。Day 12 的会话与消息历史接口保持可用。已使用真实 `deepseek-chat` 完成三轮记忆与消息持久化验收；本地 Mock 仍仅供无密钥时联调。
+基于 Rust 的聊天服务，使用 Axum/Tokio 提供 HTTP API，通过 SQLx/PostgreSQL 持久化会话与消息，调用兼容 OpenAI Chat Completions 协议的模型接口。
 
 ## 启动后端
 
@@ -15,6 +15,8 @@ cargo run -p ai-server
 
 默认地址为 `http://127.0.0.1:3000`，可通过 `.env` 中的 `PORT` 修改。
 
+## API
+
 | 方法 | 路径 | 请求体 / 用途 |
 | --- | --- | --- |
 | GET | `/api/health` | 服务状态与版本 |
@@ -26,9 +28,9 @@ cargo run -p ai-server
 | GET | `/api/conversations/{id}/messages?limit=50` | 获取该会话最近 N 条消息，按时间正序返回 |
 | POST | `/api/conversations/{id}/chat` | `{"prompt":"Hello Rust"}`；多轮聊天，返回已保存的助手消息 |
 
-`LLM_API_BASE` 和 `LLM_MODEL` 应填写同一服务商支持的接口与模型。`LLM_API_KEY` 留空或为模板占位值时，聊天接口返回本地 Mock 回复。
+`LLM_API_BASE` 和 `LLM_MODEL` 应填写同一服务商支持的接口与模型。`LLM_API_KEY` 留空或为模板占位值时，聊天接口返回本地 Mock 回复。配置保存在被 Git 忽略的 `.env` 中，不要提交真实密钥。
 
-## Day 8：启动数据库
+## 数据库
 
 先安装并启动 Docker Desktop，使用 Linux 容器。然后在项目根目录运行：
 
@@ -64,7 +66,7 @@ sqlx database create
 sqlx migrate run
 ```
 
-Compose 首次初始化时会创建数据库；`sqlx database create` 确保目标数据库存在。`sqlx migrate run` 按版本执行尚未应用的迁移，创建 `conversations`、`messages` 两张表及索引。当前迁移不启用 vector 扩展；Day 12 尚不使用向量检索。
+Compose 首次初始化时会创建数据库；`sqlx database create` 确保目标数据库存在。`sqlx migrate run` 按版本执行尚未应用的迁移，创建 `conversations`、`messages` 两张表及索引。当前迁移不启用 vector 扩展，服务不使用向量检索。
 
 常用维护命令：
 
@@ -76,7 +78,7 @@ docker compose start postgres
 
 正常停止容器会保留数据。账号和数据库名的初始化环境变量只在首次创建数据目录时生效。
 
-## Day 12：消息历史验收
+## 会话与消息历史
 
 - `save_message` 保存 `system`、`user`、`assistant` 消息；数据库拒绝其他角色。
 - `get_recent_messages` 先按 `(created_at DESC, id DESC)` 取最近 N 条，再翻转为正序。时间相同时以 UUID 稳定排序，不代表实际发送先后。
@@ -85,20 +87,20 @@ docker compose start postgres
 - 非法 UUID 或非整数 `limit` 返回 `400`。Axum 0.8 路由参数使用 `/{id}`，不是 `/:id`。
 - 删除会话会通过外键级联删除消息。
 
-后端运行后，在另一个 PowerShell 终端中手动检查：
+后端运行后，可在另一个 PowerShell 终端中调用接口：
 
 ```powershell
 $base = "http://127.0.0.1:3000"
 $conversation = Invoke-RestMethod -Method Post -Uri "$base/api/conversations" `
-    -ContentType "application/json" -Body '{"title":"Day 12 check"}'
+    -ContentType "application/json" -Body '{"title":"history-example"}'
 Invoke-RestMethod -Uri "$base/api/conversations"
 Invoke-RestMethod -Uri "$base/api/conversations/$($conversation.id)/messages?limit=3"
 Invoke-RestMethod -Method Delete -Uri "$base/api/conversations/$($conversation.id)"
 ```
 
-新建会话的历史是空数组。消息写入使用下文 Day 13 的会话聊天接口；原有 `POST /api/chat` 仍是独立问答，不保存会话历史。
+新建会话的历史是空数组。消息写入使用会话聊天接口 `POST /api/conversations/{id}/chat`；`POST /api/chat` 是独立问答，不保存会话历史。
 
-## Day 13：多轮聊天持久化
+## 多轮聊天持久化
 
 `POST /api/conversations/{id}/chat` 的处理顺序：
 
@@ -109,12 +111,12 @@ Invoke-RestMethod -Method Delete -Uri "$base/api/conversations/$($conversation.i
 
 空白提问返回 400，不存在的会话返回 404，均不保存消息。LLM 调用失败返回 500，已保存的用户消息保留，不伪造助手回复；再次发送会另存一条用户消息，没有自动重试去重。串行发送同一会话的请求；当前没有并发轮次隔离。
 
-配置同一提供商支持的 `LLM_API_BASE`、`LLM_MODEL` 和有效 `LLM_API_KEY`，重启后端后用 PowerShell 连续验证三轮：
+配置同一提供商支持的 `LLM_API_BASE`、`LLM_MODEL` 和有效 `LLM_API_KEY`，重启后端后用 PowerShell 调用会话聊天接口：
 
 ```powershell
 $base = "http://127.0.0.1:3000"
 $conversation = Invoke-RestMethod -Method Post -Uri "$base/api/conversations" `
-    -ContentType "application/json" -Body '{"title":"Day 13 check"}'
+    -ContentType "application/json" -Body '{"title":"chat-example"}'
 $prompts = @(
     "Remember this code: RUST-731.",
     "What code did I ask you to remember?",
@@ -131,13 +133,11 @@ Invoke-RestMethod -Uri "$base/api/conversations/$($conversation.id)/messages" |
     Format-Table role, content
 ```
 
-三轮使用同一个会话 ID；全部成功后，历史应有 6 条交替的用户和助手消息。真实模型第二、三轮应回答 `RUST-731`。如果回复含 `[Mock LLM ...]`，只能检查接口与存库，不能勾选真实模型记忆验收。
+多轮请求使用同一个会话 ID，历史包含依次保存的用户消息和助手回复。本地 Mock 只回显最后一条用户提问，不执行真实模型推理。
 
-2026-11-10 已使用真实 `deepseek-chat` 完成三轮验收：第二、三轮均正确回忆首轮随机口令，6 条用户/助手消息按顺序持久化。此前受控 HTTP 提供商验收还覆盖上下文 50 条上限、会话隔离、错误路径和旧单轮接口。临时会话数据与验证服务均已清理；密钥仅保存在 Git 忽略的本地 `.env`，不进入版本库。
+## SQLx 离线编译
 
-## Day 14：SQLx 离线编译
-
-根目录 `.sqlx/query-*.json` 保存 SQL 宏所需的参数与结果列类型，应随代码提交 Git。不要手改这些生成文件。前两周的 8 个 API 已列在本文开头的接口表。
+根目录 `.sqlx/query-*.json` 保存 SQL 宏所需的参数与结果列类型，应随代码提交 Git。不要手改这些生成文件。
 
 修改 SQL 宏查询或相关表结构后，先启动数据库、执行迁移，再重新生成并校验：
 
@@ -163,9 +163,7 @@ finally {
 
 `--workspace` 使用统一的根目录缓存，`--all-targets` 覆盖测试中的 SQL 宏。生成和 `--check` 校验需要真实数据库；`SQLX_OFFLINE=true` 强制编译时读取缓存，不连接数据库，也不会让运行中的服务脱离数据库。它与 Cargo 的依赖离线模式 `--offline` 不同。
 
-本地已验证 6 份查询元数据与数据库一致；使用全新编译目录、`SQLX_OFFLINE=true` 和指向 `127.0.0.1:1` 的不可连接数据库地址，`cargo check --workspace --all-targets` 仍通过。离线编译模式下的 10 项测试与 Clippy 也通过；数据库测试执行时仍连接正常运行的 PostgreSQL。临时编译目录已清理。
-
-## 验证
+## 开发检查
 
 ```powershell
 cargo fmt --all -- --check
@@ -177,4 +175,4 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 回归测试覆盖消息读写、最近 N 条及同时间戳排序、会话隔离、历史数量上下界、空历史、404、删除级联，以及聊天非法输入不写库、提供商失败时保留用户消息。SQLx 测试使用独立临时数据库，不写入开发会话。
 
-GitHub Actions 的构建和测试步骤均设置 `SQLX_OFFLINE=true`，编译 SQL 宏时使用提交的缓存。PostgreSQL 服务与迁移步骤仍保留，供运行数据库集成测试使用；任何迁移 SQL 错误都会立即使步骤失败。本地验证通过不等同于远端 CI 已通过，推送后需检查对应运行结果。
+GitHub Actions 的构建和测试步骤均设置 `SQLX_OFFLINE=true`，编译 SQL 宏时使用提交的缓存。PostgreSQL 服务与迁移步骤仍保留，供运行数据库集成测试使用；任何迁移 SQL 错误都会立即使步骤失败。
