@@ -1,6 +1,6 @@
 # Project Rust
 
-按每日实战计划构建 Rust + Next.js AI SaaS。当前已完成 Day 13 多轮聊天持久化：用户提问存库、读取历史调用 LLM、助手回复存库。Day 12 的会话与消息历史接口保持可用。已使用真实 `deepseek-chat` 完成三轮记忆与消息持久化验收；本地 Mock 仍仅供无密钥时联调。
+按每日实战计划构建 Rust + Next.js AI SaaS。当前已实现 Day 13 多轮聊天持久化，并具备 Day 14 的 SQLx 离线编译能力。Day 12 的会话与消息历史接口保持可用。已使用真实 `deepseek-chat` 完成三轮记忆与消息持久化验收；本地 Mock 仍仅供无密钥时联调。
 
 ## 启动后端
 
@@ -135,6 +135,36 @@ Invoke-RestMethod -Uri "$base/api/conversations/$($conversation.id)/messages" |
 
 2026-11-10 已使用真实 `deepseek-chat` 完成三轮验收：第二、三轮均正确回忆首轮随机口令，6 条用户/助手消息按顺序持久化。此前受控 HTTP 提供商验收还覆盖上下文 50 条上限、会话隔离、错误路径和旧单轮接口。临时会话数据与验证服务均已清理；密钥仅保存在 Git 忽略的本地 `.env`，不进入版本库。
 
+## Day 14：SQLx 离线编译
+
+根目录 `.sqlx/query-*.json` 保存 SQL 宏所需的参数与结果列类型，应随代码提交 Git。不要手改这些生成文件。前两周的 8 个 API 已列在本文开头的接口表。
+
+修改 SQL 宏查询或相关表结构后，先启动数据库、执行迁移，再重新生成并校验：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start-db.ps1
+sqlx migrate run
+$previousOffline = $env:SQLX_OFFLINE
+try {
+    $env:SQLX_OFFLINE = "false"
+    cargo sqlx prepare --workspace -- --all-targets
+    if ($LASTEXITCODE -ne 0) { throw "SQLx metadata generation failed" }
+    cargo sqlx prepare --workspace --check -- --all-targets
+    if ($LASTEXITCODE -ne 0) { throw "SQLx metadata is not up to date" }
+
+    $env:SQLX_OFFLINE = "true"
+    cargo check --workspace --all-targets
+    if ($LASTEXITCODE -ne 0) { throw "SQLx offline compilation failed" }
+}
+finally {
+    $env:SQLX_OFFLINE = $previousOffline
+}
+```
+
+`--workspace` 使用统一的根目录缓存，`--all-targets` 覆盖测试中的 SQL 宏。生成和 `--check` 校验需要真实数据库；`SQLX_OFFLINE=true` 强制编译时读取缓存，不连接数据库，也不会让运行中的服务脱离数据库。它与 Cargo 的依赖离线模式 `--offline` 不同。
+
+本地已验证 6 份查询元数据与数据库一致；使用全新编译目录、`SQLX_OFFLINE=true` 和指向 `127.0.0.1:1` 的不可连接数据库地址，`cargo check --workspace --all-targets` 仍通过。离线编译模式下的 10 项测试与 Clippy 也通过；数据库测试执行时仍连接正常运行的 PostgreSQL。临时编译目录已清理。
+
 ## 验证
 
 ```powershell
@@ -143,8 +173,8 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-测试需要本机 PostgreSQL 正常运行，且已执行迁移：`query_as!` 在编译时检查数据库 schema，数据库集成测试还需要创建临时数据库的权限。Compose 的本地开发账号满足该条件。
+首次生成或校验 SQLx 元数据需要本机 PostgreSQL 正常运行且已执行迁移；已有 `.sqlx` 缓存时可用 `SQLX_OFFLINE=true` 离线编译。SQLx 数据库集成测试执行时仍需要数据库连接和创建临时数据库的权限，Compose 的本地开发账号满足该条件。
 
 回归测试覆盖消息读写、最近 N 条及同时间戳排序、会话隔离、历史数量上下界、空历史、404、删除级联，以及聊天非法输入不写库、提供商失败时保留用户消息。SQLx 测试使用独立临时数据库，不写入开发会话。
 
-GitHub Actions 会启动 PostgreSQL 并在编译前执行迁移 SQL；任何迁移 SQL 错误都会立即使步骤失败。本地验证通过不等同于远端 CI 已通过，推送后需检查对应运行结果。
+GitHub Actions 的构建和测试步骤均设置 `SQLX_OFFLINE=true`，编译 SQL 宏时使用提交的缓存。PostgreSQL 服务与迁移步骤仍保留，供运行数据库集成测试使用；任何迁移 SQL 错误都会立即使步骤失败。本地验证通过不等同于远端 CI 已通过，推送后需检查对应运行结果。

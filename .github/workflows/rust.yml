@@ -50,5 +50,5 @@ jobs:
 
     - name: Run tests
       env:
-        SQLX_OFFLIN: "true"
+        SQLX_OFFLINE: "true"
       run: cargo test --verbose
