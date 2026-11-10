@@ -14,13 +14,13 @@ pub struct LlmClient {
 #[derive(Serialize)]
 struct ChatCompletionRequest<'a> {
     model: &'a str,
-    messages: Vec<ChatMessage<'a>>,
+    messages: &'a [ChatMessage<'a>],
 }
 
 #[derive(Serialize)]
-struct ChatMessage<'a> {
-    role: &'a str,
-    content: &'a str,
+pub struct ChatMessage<'a> {
+    pub role: &'a str,
+    pub content: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -54,20 +54,24 @@ impl LlmClient {
         }
     }
 
-    pub async fn chat_completion(&self, prompt: &str) -> Result<String> {
-        // 如果还没配真实 API Key，返回一个本地 Mock 回复方便随时联调测试
+    pub async fn chat_completion(&self, messages: &[ChatMessage<'_>]) -> Result<String> {
         if self.api_key.is_empty() || self.api_key == "sk-your-key-here" {
             tracing::warn!("LLM_API_KEY not configured, returning mock response");
+
+            let prompt = messages
+                .iter()
+                .rev()
+                .find(|message| message.role == "user")
+                .map(|message| message.content)
+                .unwrap_or_default();
+
             return Ok(format!("[Mock LLM ({})] You said: {}", self.model, prompt));
         }
 
         let url = format!("{}/chat/completions", self.api_base);
         let req_body = ChatCompletionRequest {
             model: &self.model,
-            messages: vec![ChatMessage {
-                role: "user",
-                content: prompt,
-            }],
+            messages,
         };
 
         let resp = self

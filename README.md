@@ -1,6 +1,6 @@
 # Project Rust
 
-按每日实战计划构建 Rust + Next.js AI SaaS。当前已完成 Day 12：Axum 后端已接入 PostgreSQL 连接池和数据库迁移，支持会话创建、列表、删除，以及消息保存和历史读取。多轮聊天持久化属于 Day 13，尚未实现。
+按每日实战计划构建 Rust + Next.js AI SaaS。当前已实现 Day 13 多轮聊天持久化：用户提问存库、读取历史调用 LLM、助手回复存库。Day 12 的会话与消息历史接口保持可用。真实模型三轮记忆验收需要有效 API Key；本地 Mock 不能证明模型记忆。
 
 ## 启动后端
 
@@ -24,6 +24,7 @@ cargo run -p ai-server
 | GET | `/api/conversations` | 列出会话，按创建时间倒序 |
 | DELETE | `/api/conversations/{id}` | 删除会话及其消息，返回 204；不存在返回 404 |
 | GET | `/api/conversations/{id}/messages?limit=50` | 获取该会话最近 N 条消息，按时间正序返回 |
+| POST | `/api/conversations/{id}/chat` | `{"prompt":"Hello Rust"}`；多轮聊天，返回已保存的助手消息 |
 
 `LLM_API_BASE` 和 `LLM_MODEL` 应填写同一服务商支持的接口与模型。`LLM_API_KEY` 留空或为模板占位值时，聊天接口返回本地 Mock 回复。
 
@@ -95,7 +96,44 @@ Invoke-RestMethod -Uri "$base/api/conversations/$($conversation.id)/messages?lim
 Invoke-RestMethod -Method Delete -Uri "$base/api/conversations/$($conversation.id)"
 ```
 
-新建会话的历史是空数组。Day 12 尚无 HTTP 消息写入接口；`POST /api/chat` 仍是独立问答，不保存会话历史。多轮提问、历史传给 LLM、回复存库留在 Day 13。
+新建会话的历史是空数组。消息写入使用下文 Day 13 的会话聊天接口；原有 `POST /api/chat` 仍是独立问答，不保存会话历史。
+
+## Day 13：多轮聊天持久化
+
+`POST /api/conversations/{id}/chat` 的处理顺序：
+
+1. 检查提问非空、会话存在。
+2. 保存 `user` 消息，读取该会话最近 50 条历史，包含当前提问且不重复追加。
+3. 按历史顺序将 `role` 和 `content` 发送给 LLM。
+4. 保存 `assistant` 回复，返回该消息的 `id`、`conversation_id`、`role`、`content`、`token_count` 和 `created_at`。调用方读取 `content`，不是旧接口的 `reply`。
+
+空白提问返回 400，不存在的会话返回 404，均不保存消息。LLM 调用失败返回 500，已保存的用户消息保留，不伪造助手回复；再次发送会另存一条用户消息，没有自动重试去重。串行发送同一会话的请求；当前没有并发轮次隔离。
+
+配置同一提供商支持的 `LLM_API_BASE`、`LLM_MODEL` 和有效 `LLM_API_KEY`，重启后端后用 PowerShell 连续验证三轮：
+
+```powershell
+$base = "http://127.0.0.1:3000"
+$conversation = Invoke-RestMethod -Method Post -Uri "$base/api/conversations" `
+    -ContentType "application/json" -Body '{"title":"Day 13 check"}'
+$prompts = @(
+    "Remember this code: RUST-731.",
+    "What code did I ask you to remember?",
+    "Repeat that code without explanation."
+)
+foreach ($prompt in $prompts) {
+    $body = @{ prompt = $prompt } | ConvertTo-Json
+    $reply = Invoke-RestMethod -Method Post `
+        -Uri "$base/api/conversations/$($conversation.id)/chat" `
+        -ContentType "application/json" -Body $body
+    $reply.content
+}
+Invoke-RestMethod -Uri "$base/api/conversations/$($conversation.id)/messages" |
+    Format-Table role, content
+```
+
+三轮使用同一个会话 ID；全部成功后，历史应有 6 条交替的用户和助手消息。真实模型第二、三轮应回答 `RUST-731`。如果回复含 `[Mock LLM ...]`，只能检查接口与存库，不能勾选真实模型记忆验收。
+
+本地已通过受控 HTTP 提供商的三轮历史与落库验收，以及上下文 50 条上限、会话隔离、错误路径和旧单轮接口检查。这不是外部真实模型验收。临时会话数据已清理。
 
 ## 验证
 
@@ -107,6 +145,6 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 测试需要本机 PostgreSQL 正常运行，且已执行迁移：`query_as!` 在编译时检查数据库 schema，数据库集成测试还需要创建临时数据库的权限。Compose 的本地开发账号满足该条件。
 
-回归测试覆盖消息读写、最近 N 条及同时间戳排序、会话隔离、历史数量上下界、空历史、404 和删除级联。SQLx 测试使用独立临时数据库，不写入开发会话。
+回归测试覆盖消息读写、最近 N 条及同时间戳排序、会话隔离、历史数量上下界、空历史、404、删除级联，以及聊天非法输入不写库、提供商失败时保留用户消息。SQLx 测试使用独立临时数据库，不写入开发会话。
 
 GitHub Actions 会启动 PostgreSQL 并在编译前执行迁移 SQL；任何迁移 SQL 错误都会立即使步骤失败。本地验证通过不等同于远端 CI 已通过，推送后需检查对应运行结果。

@@ -3,7 +3,7 @@ mod error;
 mod state;
 
 use crate::error::{AppError, AppResult};
-use ai_core::SystemInfo;
+use ai_core::{SystemInfo, llm::ChatMessage};
 use axum::{
     Json, Router,
     extract::State,
@@ -75,7 +75,13 @@ async fn chat(
         return Err(AppError::BadRequest("prompt cannot be empty".to_string()));
     }
 
-    let reply = state.llm.chat_completion(prompt).await?;
+    let reply = state
+        .llm
+        .chat_completion(&[ChatMessage {
+            role: "user",
+            content: prompt,
+        }])
+        .await?;
     Ok(Json(ChatResponse { reply }))
 }
 
@@ -130,6 +136,7 @@ pub fn build_app(state: AppState) -> Router {
             "/api/conversations/{id}/messages",
             get(conversations::list_messages),
         )
+        .route("/api/conversations/{id}/chat", post(conversations::chat))
         .layer(TraceLayer::new_for_http())
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
