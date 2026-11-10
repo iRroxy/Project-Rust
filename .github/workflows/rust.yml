@@ -44,7 +44,11 @@ jobs:
         done
 
     - name: Build
+      env:
+        SQLX_OFFLINE: "true"
       run: cargo build --verbose
 
     - name: Run tests
+      env:
+        SQLX_OFFLIN: "true"
       run: cargo test --verbose
