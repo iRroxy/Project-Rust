@@ -8,3 +8,12 @@ serde.workspace = true
 anyhow.workspace = true
 reqwest.workspace = true
 tracing.workspace = true
+serde_json.workspace = true
+futures-util.workspace = true
+eventsource-stream.workspace = true
+async-stream.workspace = true
+[dev-dependencies]
+tokio.workspace = true
+dotenvy.workspace = true
+
+

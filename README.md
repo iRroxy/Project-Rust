@@ -138,6 +138,20 @@ Invoke-RestMethod -Uri "$base/api/conversations/$($conversation.id)/messages" |
 
 多轮请求使用同一个会话 ID，历史包含依次保存的用户消息和助手回复。本地 Mock 只回显最后一条用户提问，不执行真实模型推理。
 
+## LLM 流式客户端
+
+`ai_core::llm::LlmClient::chat_stream(&messages)` 向 OpenAI 兼容的 `/chat/completions` 接口发送 `stream: true`，返回 `Stream<Item = anyhow::Result<String>>`。结果流支持 `Send + 'static`，不借用调用方的客户端或消息。
+
+客户端按 SSE 事件解析响应，逐段产出非空 `delta.content`，跳过角色和用量事件，以 `[DONE]` 正常结束。HTTP 错误、无效 JSON、读取失败或未收到 `[DONE]` 的中断均返回错误；流式请求要求配置真实密钥，不使用 Mock。
+
+在根目录 `.env` 配置 `LLM_API_BASE`、`LLM_API_KEY` 和 `LLM_MODEL` 后运行：
+
+```powershell
+cargo run -p ai-core --example stream_client
+```
+
+示例逐段刷新标准输出，无需启动数据库或 HTTP 服务。客户端总请求超时为 60 秒；此接口本身不写入数据库，也不新增 HTTP 路由。
+
 ## SSE 模拟流
 
 `GET /api/stream-demo` 返回 `Content-Type: text/event-stream`，循环推送 `Rust`、`streams`、`tokens`、`with`、`SSE`，约 5 秒后结束连接。
