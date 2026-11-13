@@ -23,6 +23,7 @@ tracing = "0.1"
 axum = "0.8"
 dotenvy = "0.15"
 thiserror = "2"
+tokio-stream = "0.1"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "macros", "migrate"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }

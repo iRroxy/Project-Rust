@@ -18,6 +18,7 @@ tower-http.workspace = true
 ai-db.workspace = true
 sqlx.workspace = true
 uuid.workspace = true
+tokio-stream.workspace = true
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

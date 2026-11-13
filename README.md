@@ -6,6 +6,8 @@
 
 在项目根目录运行。先安装并启动 Docker Desktop，以及下文的 SQLx CLI。新检出项目时复制环境变量模板；已有 `.env` 时保留现有文件：
 
+Windows 编译需要 Visual Studio Build Tools 的 MSVC C++ 工具集和 Windows SDK。请使用 Developer PowerShell 或 x64 Native Tools Command Prompt，确保调用的是 Microsoft 链接器，而不是 Git/MSYS 环境中的同名 `link.exe`。
+
 ```powershell
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 powershell -ExecutionPolicy Bypass -File .\scripts\start-db.ps1
@@ -27,6 +29,7 @@ cargo run -p ai-server
 | DELETE | `/api/conversations/{id}` | 删除会话及其消息，返回 204；不存在返回 404 |
 | GET | `/api/conversations/{id}/messages?limit=50` | 获取该会话最近 N 条消息，按时间正序返回 |
 | POST | `/api/conversations/{id}/chat` | `{"prompt":"Hello Rust"}`；多轮聊天，返回已保存的助手消息 |
+| GET | `/api/stream-demo` | SSE 模拟流，约每 200ms 推送一个单词，共 25 条事件 |
 
 `LLM_API_BASE` 和 `LLM_MODEL` 应填写同一服务商支持的接口与模型。`LLM_API_KEY` 留空或为模板占位值时，聊天接口返回本地 Mock 回复。配置保存在被 Git 忽略的 `.env` 中，不要提交真实密钥。
 
@@ -134,6 +137,18 @@ Invoke-RestMethod -Uri "$base/api/conversations/$($conversation.id)/messages" |
 ```
 
 多轮请求使用同一个会话 ID，历史包含依次保存的用户消息和助手回复。本地 Mock 只回显最后一条用户提问，不执行真实模型推理。
+
+## SSE 模拟流
+
+`GET /api/stream-demo` 返回 `Content-Type: text/event-stream`，循环推送 `Rust`、`streams`、`tokens`、`with`、`SSE`，约 5 秒后结束连接。
+
+接口通过有界 Tokio 通道和 `ReceiverStream` 输出事件。客户端断开后，发送失败会停止生成；接口不调用模型、不写入数据库。
+
+使用 `curl.exe -N` 禁用客户端输出缓冲，观察逐条到达的事件：
+
+```powershell
+curl.exe -N http://127.0.0.1:3000/api/stream-demo
+```
 
 ## SQLx 离线编译
 

@@ -1,6 +1,7 @@
 mod conversations;
 mod error;
 mod state;
+mod stream;
 
 use crate::error::{AppError, AppResult};
 use ai_core::{SystemInfo, llm::ChatMessage};
@@ -137,6 +138,7 @@ pub fn build_app(state: AppState) -> Router {
             get(conversations::list_messages),
         )
         .route("/api/conversations/{id}/chat", post(conversations::chat))
+        .route("/api/stream-demo", get(stream::demo))
         .layer(TraceLayer::new_for_http())
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
