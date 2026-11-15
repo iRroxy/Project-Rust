@@ -29,9 +29,10 @@ cargo run -p ai-server
 | DELETE | `/api/conversations/{id}` | 删除会话及其消息，返回 204；不存在返回 404 |
 | GET | `/api/conversations/{id}/messages?limit=50` | 获取该会话最近 N 条消息，按时间正序返回 |
 | POST | `/api/conversations/{id}/chat` | `{"prompt":"Hello Rust"}`；多轮聊天，返回已保存的助手消息 |
+| POST | `/api/conversations/{id}/chat/stream` | `{"prompt":"Hello Rust"}`；SSE 多轮聊天，完成后保存完整助手回复 |
 | GET | `/api/stream-demo` | SSE 模拟流，约每 200ms 推送一个单词，共 25 条事件 |
 
-`LLM_API_BASE` 和 `LLM_MODEL` 应填写同一服务商支持的接口与模型。`LLM_API_KEY` 留空或为模板占位值时，聊天接口返回本地 Mock 回复。配置保存在被 Git 忽略的 `.env` 中，不要提交真实密钥。
+`LLM_API_BASE` 和 `LLM_MODEL` 应填写同一服务商支持的接口与模型。`LLM_API_KEY` 留空或为模板占位值时，普通聊天接口返回本地 Mock 回复；流式聊天必须配置有效密钥。配置保存在被 Git 忽略的 `.env` 中，不要提交真实密钥。
 
 ## 数据库
 
@@ -101,7 +102,7 @@ Invoke-RestMethod -Uri "$base/api/conversations/$($conversation.id)/messages?lim
 Invoke-RestMethod -Method Delete -Uri "$base/api/conversations/$($conversation.id)"
 ```
 
-新建会话的历史是空数组。消息写入使用会话聊天接口 `POST /api/conversations/{id}/chat`；`POST /api/chat` 是独立问答，不保存会话历史。
+新建会话的历史是空数组。消息写入使用会话普通聊天接口 `POST /api/conversations/{id}/chat` 或流式聊天接口 `POST /api/conversations/{id}/chat/stream`；`POST /api/chat` 是独立问答，不保存会话历史。
 
 ## 多轮聊天持久化
 
@@ -138,6 +139,35 @@ Invoke-RestMethod -Uri "$base/api/conversations/$($conversation.id)/messages" |
 
 多轮请求使用同一个会话 ID，历史包含依次保存的用户消息和助手回复。本地 Mock 只回显最后一条用户提问，不执行真实模型推理。
 
+## 会话流式聊天
+
+`POST /api/conversations/{id}/chat/stream` 接收 `{"prompt":"..."}`，复用普通聊天的校验、用户消息保存和最近 50 条历史。响应为 `text/event-stream`，不支持 Mock。
+
+| SSE 事件 | `data` 格式 | 含义 |
+| --- | --- | --- |
+| `delta` | JSON 字符串，如 `"你好\n"` | 一段回复文本；JSON 编码保留原始换行和 Unicode |
+| `done` | `{"message_id":"UUID"}` | 上游收到 `[DONE]`，且完整助手回复已成功存库 |
+| `error` | `{"error":{"code":"INTERNAL_ERROR","message":"Unable to complete streaming reply"}}` | 流读取、解析或持久化失败，随后关闭连接 |
+
+后台任务使用容量为 16 的有界通道推送分片，同时拼接完整回复。正常结束后只保存一条 `assistant` 消息，再发送 `done`；不逐片写库。上游异常时保留用户消息，不保存半截助手回复。
+
+建立 SSE 前的失败沿用普通 JSON 错误响应：空白提问返回 400、会话不存在返回 404，均不写库；模型请求失败返回 500，已保存的用户消息保留。建立 SSE 后的失败通过 `error` 事件报告，不能再修改 HTTP 状态。客户端必须以 `done` 确认保存成功，不能把连接关闭当成成功。
+
+发送失败会停止读取上游，不保存未完成回复；等待上游数据期间不主动检测客户端断开。同一会话需串行发送请求，当前没有并发轮次隔离。
+
+后端运行并配置真实模型后，在 PowerShell 中调用：
+
+```powershell
+$base = "http://127.0.0.1:3000"
+$conversation = Invoke-RestMethod -Method Post -Uri "$base/api/conversations" `
+    -ContentType "application/json" -Body '{"title":"stream-example"}'
+$body = @{ prompt = "Briefly explain Rust streams." } | ConvertTo-Json -Compress
+$body | curl.exe -N -H "Content-Type: application/json" --data-binary "@-" `
+    "$base/api/conversations/$($conversation.id)/chat/stream"
+Invoke-RestMethod -Uri "$base/api/conversations/$($conversation.id)/messages" |
+    Format-Table id, role, content
+```
+
 ## LLM 流式客户端
 
 `ai_core::llm::LlmClient::chat_stream(&messages)` 向 OpenAI 兼容的 `/chat/completions` 接口发送 `stream: true`，返回 `Stream<Item = anyhow::Result<String>>`。结果流支持 `Send + 'static`，不借用调用方的客户端或消息。
@@ -150,7 +180,7 @@ Invoke-RestMethod -Uri "$base/api/conversations/$($conversation.id)/messages" |
 cargo run -p ai-core --example stream_client
 ```
 
-示例逐段刷新标准输出，无需启动数据库或 HTTP 服务。客户端总请求超时为 60 秒；此接口本身不写入数据库，也不新增 HTTP 路由。
+示例逐段刷新标准输出，无需启动数据库或 HTTP 服务。客户端总请求超时为 60 秒；此 core 方法不直接访问数据库。
 
 ## SSE 模拟流
 
@@ -202,6 +232,6 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 首次生成或校验 SQLx 元数据需要本机 PostgreSQL 正常运行且已执行迁移；已有 `.sqlx` 缓存时可用 `SQLX_OFFLINE=true` 离线编译。SQLx 数据库集成测试执行时仍需要数据库连接和创建临时数据库的权限，Compose 的本地开发账号满足该条件。
 
-回归测试覆盖消息读写、最近 N 条及同时间戳排序、会话隔离、历史数量上下界、空历史、404、删除级联，以及聊天非法输入不写库、提供商失败时保留用户消息。SQLx 测试使用独立临时数据库，不写入开发会话。
+回归测试覆盖消息读写、最近 N 条及同时间戳排序、会话隔离、历史数量上下界、空历史、404、删除级联，以及聊天非法输入不写库、提供商失败时保留用户消息。流式测试验证完成前可收到分片、换行和 Unicode 保真、完整回复保存后才发送 `done`、上游异常不保存半截回复、持久化失败不报告成功。SQLx 测试使用独立临时数据库，不写入开发会话。
 
 GitHub Actions 的构建和测试步骤均设置 `SQLX_OFFLINE=true`，编译 SQL 宏时使用提交的缓存。PostgreSQL 服务与迁移步骤仍保留，供运行数据库集成测试使用；任何迁移 SQL 错误都会立即使步骤失败。

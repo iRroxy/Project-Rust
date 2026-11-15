@@ -138,6 +138,10 @@ pub fn build_app(state: AppState) -> Router {
             get(conversations::list_messages),
         )
         .route("/api/conversations/{id}/chat", post(conversations::chat))
+        .route(
+            "/api/conversations/{id}/chat/stream",
+            post(conversations::chat_stream),
+        )
         .route("/api/stream-demo", get(stream::demo))
         .layer(TraceLayer::new_for_http())
         .layer(TimeoutLayer::with_status_code(
