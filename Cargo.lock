@@ -47,6 +47,7 @@ dependencies = [
  "axum",
  "dotenvy",
  "eventsource-stream",
+ "futures-util",
  "http-body-util",
  "serde",
  "serde_json",

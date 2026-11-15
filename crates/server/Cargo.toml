@@ -24,3 +24,4 @@ tokio-stream.workspace = true
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 eventsource-stream.workspace = true
+futures-util.workspace = true

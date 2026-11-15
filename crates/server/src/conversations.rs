@@ -148,21 +148,41 @@ pub async fn chat_stream(
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(16);
 
     tokio::spawn(async move {
-        tokio::pin!(stream);
         let result: anyhow::Result<()> = async {
             let mut full_response = String::new();
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk?;
-                full_response.push_str(&chunk);
-                let event = Event::default().event("delta").json_data(&chunk)?;
-                if tx.send(Ok(event)).await.is_err() {
-                    return Ok(());
+            // Drop the owning upstream stream before awaiting persistence.
+            let completed = {
+                tokio::pin!(stream);
+                loop {
+                    let next = tokio::select! {
+                        biased;
+                        _ = tx.closed() => break false,
+                        next = stream.next() => next,
+                    };
+                    let Some(chunk) = next else {
+                        break true;
+                    };
+                    let chunk = chunk?;
+                    full_response.push_str(&chunk);
+                    let event = Event::default().event("delta").json_data(&chunk)?;
+                    if tx.send(Ok(event)).await.is_err() {
+                        break false;
+                    }
                 }
+            };
+            if !completed {
+                if !full_response.is_empty() && !full_response.ends_with('\n') {
+                    full_response.push('\n');
+                }
+                full_response.push_str("[Interrupted]");
             }
 
             let saved =
                 ai_db::message::save_message(&state.db, id, "assistant", &full_response, None)
                     .await?;
+            if !completed {
+                return Ok(());
+            }
             let done = Event::default().event("done").json_data(StreamDone {
                 message_id: saved.id,
             })?;
@@ -281,11 +301,20 @@ mod tests {
 
     struct Provider {
         task: tokio::task::JoinHandle<()>,
+        closed: Arc<Notify>,
     }
 
     impl Drop for Provider {
         fn drop(&mut self) {
             self.task.abort();
+        }
+    }
+
+    struct BodyDropped(Arc<Notify>);
+
+    impl Drop for BodyDropped {
+        fn drop(&mut self) {
+            self.0.notify_one();
         }
     }
 
@@ -297,22 +326,28 @@ mod tests {
     ) -> (Router, Provider) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let closed = Arc::new(Notify::new());
+        let body_closed = closed.clone();
         let provider = Router::new().route(
             "/chat/completions",
             post(move || {
                 let gate = gate.clone();
+                let closed = body_closed.clone();
                 async move {
-                    let chunks = tokio_stream::iter([first, tail].into_iter().enumerate()).then(
-                        move |(index, chunk)| {
-                            let gate = gate.clone();
-                            async move {
-                                if index == 1
-                                    && let Some(gate) = gate
-                                {
-                                    gate.notified().await;
-                                }
-                                Ok::<_, Infallible>(chunk)
+                    let chunks = futures_util::stream::unfold(
+                        (
+                            [first, tail].into_iter().enumerate(),
+                            gate,
+                            BodyDropped(closed),
+                        ),
+                        |(mut chunks, gate, dropped)| async move {
+                            let (index, chunk) = chunks.next()?;
+                            if index == 1
+                                && let Some(gate) = &gate
+                            {
+                                gate.notified().await;
                             }
+                            Some((Ok::<_, Infallible>(chunk), (chunks, gate, dropped)))
                         },
                     );
                     (
@@ -327,7 +362,7 @@ mod tests {
         });
         (
             test_app(pool, format!("http://{address}"), "local-test-only".into()),
-            Provider { task },
+            Provider { task, closed },
         )
     }
 
@@ -451,5 +486,129 @@ mod tests {
         })
         .await
         .expect("failed persistence must terminate without a done event");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn disconnect_drops_idle_upstream_before_persisting_interrupted_reply(
+        pool: ai_db::PgPool,
+    ) {
+        for (first, expected, read_first) in [
+            (FIRST_CHUNK, "你\n好\r\n[Interrupted]", true),
+            (
+                "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+                "[Interrupted]",
+                false,
+            ),
+        ] {
+            let conv = ai_db::conversations::create_conversation(&pool, None)
+                .await
+                .unwrap();
+            let gate = Arc::new(Notify::new());
+            let (app, provider) = streaming_app(pool.clone(), first, LAST_CHUNKS, Some(gate)).await;
+
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let held_connections = {
+                    let response = app.oneshot(stream_request(conv.id)).await.unwrap();
+                    assert_eq!(response.status(), StatusCode::OK);
+                    let events = BodyDataStream::new(response.into_body()).eventsource();
+                    tokio::pin!(events);
+                    if read_first {
+                        let event = events.next().await.unwrap().unwrap();
+                        assert_eq!(event.event, "delta");
+                        assert_eq!(
+                            serde_json::from_str::<String>(&event.data).unwrap(),
+                            "你\n好\r\n"
+                        );
+                    }
+
+                    // Block persistence to prove upstream is dropped first.
+                    let mut held =
+                        Vec::with_capacity(pool.options().get_max_connections() as usize);
+                    for _ in 0..pool.options().get_max_connections() {
+                        held.push(pool.acquire().await.unwrap());
+                    }
+                    held
+                };
+
+                tokio::time::timeout(Duration::from_secs(5), provider.closed.notified())
+                    .await
+                    .expect("disconnect must close the idle upstream before database access");
+                drop(held_connections);
+
+                loop {
+                    let history = ai_db::message::get_recent_messages(&pool, conv.id, 50)
+                        .await
+                        .unwrap();
+                    if let Some(reply) = history.iter().find(|message| message.role == "assistant")
+                    {
+                        assert_eq!(history.len(), 2);
+                        assert_eq!(reply.content, expected);
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("disconnect must cancel and persist without another upstream token");
+        }
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn disconnect_after_upstream_completion_keeps_full_reply(pool: ai_db::PgPool) {
+        let conv = ai_db::conversations::create_conversation(&pool, None)
+            .await
+            .unwrap();
+        let gate = Arc::new(Notify::new());
+        let (app, _provider) =
+            streaming_app(pool.clone(), FIRST_CHUNK, LAST_CHUNKS, Some(gate.clone())).await;
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let transaction = {
+                let response = app.oneshot(stream_request(conv.id)).await.unwrap();
+                let events = BodyDataStream::new(response.into_body()).eventsource();
+                tokio::pin!(events);
+                assert_eq!(events.next().await.unwrap().unwrap().event, "delta");
+
+                let mut transaction = pool.begin().await.unwrap();
+                sqlx::query("LOCK TABLE messages IN SHARE MODE")
+                    .execute(&mut *transaction)
+                    .await
+                    .unwrap();
+                gate.notify_one();
+
+                // Wait until [DONE] has been consumed and the final INSERT is blocked.
+                loop {
+                    let waiting: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM pg_locks \
+                         WHERE relation = 'messages'::regclass AND NOT granted \
+                         AND database = (SELECT oid FROM pg_database \
+                         WHERE datname = current_database()))",
+                    )
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                    if waiting {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                transaction
+            };
+            transaction.commit().await.unwrap();
+
+            loop {
+                let history = ai_db::message::get_recent_messages(&pool, conv.id, 50)
+                    .await
+                    .unwrap();
+                if let Some(reply) = history.iter().find(|message| message.role == "assistant") {
+                    assert_eq!(history.len(), 2);
+                    assert_eq!(reply.content, "你\n好\r\n，Rust🦀");
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a completed upstream reply must remain complete after the client disconnects");
     }
 }
