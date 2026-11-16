@@ -12,8 +12,12 @@ serde_json.workspace = true
 futures-util.workspace = true
 eventsource-stream.workspace = true
 async-stream.workspace = true
+schemars.workspace = true
+jsonschema.workspace = true
+
 [dev-dependencies]
 tokio.workspace = true
 dotenvy.workspace = true
+axum.workspace = true
 
 

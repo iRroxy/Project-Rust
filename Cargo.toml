@@ -27,6 +27,8 @@ tokio-stream = "0.1"
 futures-util = "0.3"
 eventsource-stream = "0.2"
 async-stream = "0.3"
+schemars = "1"
+jsonschema = { version = "0.61", default-features = false }
 
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "macros", "migrate"] }
 uuid = { version = "1", features = ["v4", "serde"] }

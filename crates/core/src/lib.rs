@@ -1,4 +1,5 @@
 pub mod llm;
+pub mod report;
 pub use llm::LlmClient;
 use serde::Serialize;
 

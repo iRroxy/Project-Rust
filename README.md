@@ -188,6 +188,35 @@ cargo run -p ai-core --example stream_client
 
 示例逐段刷新标准输出，无需启动数据库或 HTTP 服务。客户端总请求超时为 60 秒；此 core 方法不直接访问数据库。
 
+## 强类型结构化输出
+
+`LlmClient::generate_structured<T>(&self, prompt: &str)` 返回 `anyhow::Result<T>`，要求 `T: schemars::JsonSchema + serde::de::DeserializeOwned`。
+
+方法使用 `schemars` 生成 Schema，向兼容的 Chat Completions 接口发送 `response_format: {"type":"json_object"}` 和 Schema 提示。传输层通过 `{"result": ...}` 对象承载目标值，因此目标类型也可以是数组、标量或可空类型；返回值只包含解包后的 `T`。
+
+JSON 模式只保证 JSON 格式，不代表符合 Schema。方法先用 `jsonschema` 在本地校验，再反序列化为 Rust 类型；启用已知 `format` 检查，未知 `format` 按验证器默认策略处理。Schema 使用本地 `$defs` 引用，验证器依赖关闭默认的 HTTP 和文件引用解析特性。
+
+`ai_core::report::TechReport` 包含 `summary: String`、`pros: Vec<String>`、`cons: Vec<String>` 和 `score: u8`，拒绝未知字段。生成接口通过 Schema 将 `score` 限制在 0–100，而不是仅依赖 `u8` 的数值范围。
+
+```rust
+use ai_core::report::TechReport;
+
+let report: TechReport = client.generate_structured("评估 Rust + Axum 构建聊天服务").await?;
+```
+
+配置有效的 `LLM_API_BASE`、`LLM_API_KEY` 和 `LLM_MODEL` 后，可运行独立示例：
+
+```powershell
+cargo run -p ai-core --example structured_client
+cargo run -p ai-core --example structured_client -- "评估 PostgreSQL 用于聊天消息持久化"
+```
+
+示例将强类型结果打印为 JSON，不启动 HTTP 服务、不访问数据库，也不新增 HTTP 路由。空提问或缺少密钥会在请求前失败；此方法不使用 Mock。
+
+HTTP 错误、空 choices、模型拒绝、非 `stop` 的结束原因、空白内容、非法 JSON、Schema 违规或类型解码失败均返回错误。不剥离 Markdown 代码围栏，不修补输出，不自动重试。Schema 和 Rust 类型只能约束数据形状，不能保证模型分析的事实正确性。
+
+协议说明：[DeepSeek JSON Output](https://api-docs.deepseek.com/guides/json_mode)、[Schemars](https://docs.rs/schemars/)、[JSON Schema 验证器](https://docs.rs/jsonschema/)。
+
 ## SSE 模拟流
 
 `GET /api/stream-demo` 返回 `Content-Type: text/event-stream`，循环推送 `Rust`、`streams`、`tokens`、`with`、`SSE`，约 5 秒后结束连接。
@@ -239,5 +268,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 首次生成或校验 SQLx 元数据需要本机 PostgreSQL 正常运行且已执行迁移；已有 `.sqlx` 缓存时可用 `SQLX_OFFLINE=true` 离线编译。SQLx 数据库集成测试执行时仍需要数据库连接和创建临时数据库的权限，Compose 的本地开发账号满足该条件。
 
 回归测试覆盖消息读写、最近 N 条及同时间戳排序、会话隔离、历史数量上下界、空历史、404、删除级联，以及聊天非法输入不写库、提供商失败时保留用户消息。流式测试验证完成前可收到分片、换行和 Unicode 保真、完整回复保存后才发送 `done`、上游异常不保存半截回复、持久化失败不报告成功。取消测试覆盖上游空闲时断开、正文为空时保存中断标记、数据库连接耗尽时先取消上游，以及上游完成后断开仍保留完整回复。SQLx 测试使用独立临时数据库，不写入开发会话。
+
+core 的结构化输出测试覆盖评分边界及越界、缺失字段、错误类型、未知字段、数组与可空类型、截断与拒绝、空或非法内容和 HTTP 失败；测试使用本机独立 HTTP 提供商，不访问数据库或真实模型。
 
 GitHub Actions 的构建和测试步骤均设置 `SQLX_OFFLINE=true`，编译 SQL 宏时使用提交的缓存。PostgreSQL 服务与迁移步骤仍保留，供运行数据库集成测试使用；任何迁移 SQL 错误都会立即使步骤失败。
