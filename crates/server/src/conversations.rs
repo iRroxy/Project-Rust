@@ -2,7 +2,7 @@ use crate::{
     error::{AppError, AppResult},
     state::AppState,
 };
-use ai_core::{ModelSelection, ModelTier, llm::ChatMessage};
+use ai_core::{ModelTier, llm::ChatMessage};
 use ai_db::models::{Conversation, Message};
 use axum::{
     Json,
@@ -94,17 +94,14 @@ pub struct ConversationChatRequest {
     pub model: Option<String>,
 }
 
-fn resolve_selection<'a>(
-    state: &AppState,
-    payload: &'a ConversationChatRequest,
-) -> AppResult<ModelSelection<'a>> {
-    let selection = ModelSelection::from_request(payload.tier, payload.model.as_deref())
-        .map_err(|err| AppError::BadRequest(err.to_string()))?;
-    state
-        .llm
-        .resolve_model(selection)
-        .map_err(|err| AppError::BadRequest(err.to_string()))?;
-    Ok(selection)
+fn history_to_chat_messages(history: &[Message]) -> Vec<ChatMessage<'_>> {
+    history
+        .iter()
+        .map(|message| ChatMessage {
+            role: &message.role,
+            content: &message.content,
+        })
+        .collect()
 }
 
 async fn prepare_chat(state: &AppState, id: Uuid, prompt: &str) -> AppResult<Vec<Message>> {
@@ -129,15 +126,9 @@ pub async fn chat(
     Path(id): Path<Uuid>,
     Json(payload): Json<ConversationChatRequest>,
 ) -> AppResult<Json<Message>> {
-    let selection = resolve_selection(&state, &payload)?;
+    let selection = state.resolve_model_selection(payload.tier, payload.model.as_deref())?;
     let history = prepare_chat(&state, id, &payload.prompt).await?;
-    let messages: Vec<_> = history
-        .iter()
-        .map(|message| ChatMessage {
-            role: &message.role,
-            content: &message.content,
-        })
-        .collect();
+    let messages = history_to_chat_messages(&history);
     let reply = state.llm.chat_completion(&messages, selection).await?;
     let saved = ai_db::message::save_message(&state.db, id, "assistant", &reply, None).await?;
     Ok(Json(saved))
@@ -154,15 +145,9 @@ pub async fn chat_stream(
     Path(id): Path<Uuid>,
     Json(payload): Json<ConversationChatRequest>,
 ) -> AppResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
-    let selection = resolve_selection(&state, &payload)?;
+    let selection = state.resolve_model_selection(payload.tier, payload.model.as_deref())?;
     let history = prepare_chat(&state, id, &payload.prompt).await?;
-    let messages: Vec<_> = history
-        .iter()
-        .map(|message| ChatMessage {
-            role: &message.role,
-            content: &message.content,
-        })
-        .collect();
+    let messages = history_to_chat_messages(&history);
     let stream = state.llm.chat_stream(&messages, selection).await?;
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(16);
 
@@ -237,6 +222,7 @@ mod tests {
         let config = AppConfig {
             app_env: "test".to_string(),
             port: 0,
+            cors_allow_origins: vec!["http://localhost:3000".to_string()],
             llm_api_base: api_base,
             llm_api_key: api_key,
             llm_model: "test".to_string(),
@@ -344,6 +330,7 @@ mod tests {
         let config = AppConfig {
             app_env: "test".to_string(),
             port: 0,
+            cors_allow_origins: vec!["http://localhost:3000".to_string()],
             llm_api_base: format!("http://{fast_addr}"),
             llm_api_key: "fast-key".to_string(),
             llm_model: "fast-model".to_string(),

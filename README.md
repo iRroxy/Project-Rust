@@ -15,13 +15,14 @@ sqlx migrate run
 cargo run -p ai-server
 ```
 
-默认地址为 `http://127.0.0.1:3000`，可通过 `.env` 中的 `PORT` 修改。
+默认地址为 `http://127.0.0.1:3000`，可通过 `.env` 中的 `PORT` 修改；跨域白名单默认允许 `http://localhost:3000` 和 `http://127.0.0.1:3000`，可通过 `CORS_ALLOW_ORIGINS`（逗号分隔）自定义。
 
 ## API
 
 | 方法 | 路径 | 请求体 / 用途 |
 | --- | --- | --- |
 | GET | `/api/health` | 服务状态与版本 |
+| GET | `/api/models` | 当前默认档位、各档位绑定模型与可用模型列表 |
 | POST | `/api/echo` | `{"message":"Hello Rust"}` |
 | POST | `/api/chat` | `{"prompt":"Hello Rust"}`（可选 `tier` 或 `model`） |
 | POST | `/api/conversations` | `{"title":"first chat"}`；创建会话，返回 201 |
@@ -238,6 +239,18 @@ HTTP 错误、空 choices、模型拒绝、非 `stop` 的结束原因、空白�
 ```powershell
 curl.exe -N http://127.0.0.1:3000/api/stream-demo
 ```
+
+## 并发流式内存基准
+
+可使用单进程异步压测脚本观察后端在 10 路并发 SSE 流下的工作集内存（RSS）占用：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\benchmark-memory.ps1 -Concurrency 10 -Port 3005
+```
+
+本机实测（Windows Debug 构建，`ai-server` 10 路并发请求 `/api/stream-demo`，全部收到 25/25 条 SSE 事件，耗时约 5.33s）：
+- 空载基线工作集：**15.81 MB**
+- 10 并发流式峰值工作集：**16.94 MB**（增量 **+1.13 MB**）
 
 ## SQLx 离线编译
 

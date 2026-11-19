@@ -6,7 +6,6 @@ use axum::{
 use serde::Serialize;
 
 #[derive(Debug, thiserror::Error)]
-#[allow(dead_code)]
 pub enum AppError {
     #[error("{0}")]
     NotFound(String),

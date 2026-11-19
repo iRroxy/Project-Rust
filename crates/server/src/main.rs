@@ -3,8 +3,11 @@ mod error;
 mod state;
 mod stream;
 
-use crate::error::{AppError, AppResult};
-use ai_core::{ModelSelection, ModelTier, SystemInfo, llm::ChatMessage};
+use crate::{
+    error::{AppError, AppResult},
+    state::{AppConfig, AppState, ModelsInfo},
+};
+use ai_core::{ModelTier, SystemInfo, llm::ChatMessage};
 use axum::{
     Json, Router,
     extract::State,
@@ -15,8 +18,6 @@ use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, time::Duration};
 use tower_http::{cors::CorsLayer, timeout::TimeoutLayer, trace::TraceLayer};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
-
-use crate::state::{AppConfig, AppState};
 
 #[derive(Serialize)]
 struct HealthResponse {
@@ -32,6 +33,10 @@ async fn health_check(State(state): State<AppState>) -> AppResult<Json<HealthRes
         environment: state.config.app_env.clone(),
         system: SystemInfo::current(),
     }))
+}
+
+async fn list_models(State(state): State<AppState>) -> AppResult<Json<ModelsInfo>> {
+    Ok(Json(state.models_info().clone()))
 }
 
 #[derive(Deserialize)]
@@ -80,13 +85,7 @@ async fn chat(
         return Err(AppError::BadRequest("prompt cannot be empty".to_string()));
     }
 
-    let selection = ModelSelection::from_request(payload.tier, payload.model.as_deref())
-        .map_err(|err| AppError::BadRequest(err.to_string()))?;
-    state
-        .llm
-        .resolve_model(selection)
-        .map_err(|err| AppError::BadRequest(err.to_string()))?;
-
+    let selection = state.resolve_model_selection(payload.tier, payload.model.as_deref())?;
     let reply = state
         .llm
         .chat_completion(
@@ -130,13 +129,25 @@ async fn main() {
 }
 
 pub fn build_app(state: AppState) -> Router {
+    let allowed_origins: Vec<HeaderValue> = state
+        .config
+        .cors_allow_origins
+        .iter()
+        .map(|origin| {
+            origin
+                .parse::<HeaderValue>()
+                .unwrap_or_else(|_| panic!("Invalid CORS origin header value: {origin}"))
+        })
+        .collect();
+
     let cors = CorsLayer::new()
-        .allow_origin("http://localhost:3000".parse::<HeaderValue>().unwrap())
+        .allow_origin(allowed_origins)
         .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
         .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
 
     Router::new()
         .route("/api/health", get(health_check))
+        .route("/api/models", get(list_models))
         .route("/api/echo", post(echo))
         .route("/api/chat", post(chat))
         .route(
@@ -177,6 +188,10 @@ mod tests {
         AppConfig {
             app_env: "test".to_string(),
             port: 0,
+            cors_allow_origins: vec![
+                "http://localhost:3000".to_string(),
+                "http://127.0.0.1:3000".to_string(),
+            ],
             llm_api_base: "https://api.deepseek.com/v1".to_string(),
             llm_api_key: String::new(),
             llm_model: "deepseek-chat".to_string(),
@@ -206,6 +221,36 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_list_models_and_cors_allowlist() {
+        let db = ai_db::connect_lazy("postgres://test:test@localhost:5432/test").unwrap();
+        let app = build_app(AppState::new(test_config(Some("deepseek-reasoner")), db));
+
+        let req = Request::builder()
+            .uri("/api/models")
+            .header(header::ORIGIN, "http://127.0.0.1:3000")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|v| v.to_str().ok()),
+            Some("http://127.0.0.1:3000")
+        );
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["default_tier"], "fast");
+        assert_eq!(json["tiers"]["fast"], "deepseek-chat");
+        assert_eq!(json["tiers"]["reasoning"], "deepseek-reasoner");
+        assert_eq!(
+            json["models"],
+            serde_json::json!(["deepseek-chat", "deepseek-reasoner"])
+        );
     }
 
     #[tokio::test]

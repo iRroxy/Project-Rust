@@ -1,6 +1,10 @@
-use ai_core::{LlmClient, ModelProvider, ModelRouter, ModelTier};
+use crate::error::{AppError, AppResult};
+use ai_core::{LlmClient, ModelProvider, ModelRouter, ModelSelection, ModelTier};
 use ai_db::PgPool;
+use serde::Serialize;
 use std::{env, sync::Arc};
+
+const DEFAULT_CORS_ORIGINS: [&str; 2] = ["http://localhost:3000", "http://127.0.0.1:3000"];
 
 fn env_non_empty(key: &str) -> Option<String> {
     env::var(key)
@@ -9,11 +13,33 @@ fn env_non_empty(key: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn parse_cors_origins(raw: Option<String>) -> Vec<String> {
+    let origins: Vec<String> = raw
+        .into_iter()
+        .flat_map(|value| {
+            value
+                .split(',')
+                .map(|origin| origin.trim().trim_end_matches('/').to_string())
+                .filter(|origin| !origin.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    if origins.is_empty() {
+        DEFAULT_CORS_ORIGINS
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    } else {
+        origins
+    }
+}
+
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct AppConfig {
     pub app_env: String,
     pub port: u16,
+    pub cors_allow_origins: Vec<String>,
     pub llm_api_base: String,
     pub llm_api_key: String,
     pub llm_model: String,
@@ -30,6 +56,7 @@ impl AppConfig {
             .ok()
             .and_then(|p| p.parse::<u16>().ok())
             .unwrap_or(3000);
+        let cors_allow_origins = parse_cors_origins(env_non_empty("CORS_ALLOW_ORIGINS"));
         let llm_api_base = env_non_empty("LLM_API_BASE")
             .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
         let llm_api_key = env::var("LLM_API_KEY").unwrap_or_default();
@@ -42,6 +69,7 @@ impl AppConfig {
         Self {
             app_env,
             port,
+            cors_allow_origins,
             llm_api_base,
             llm_api_key,
             llm_model,
@@ -53,11 +81,26 @@ impl AppConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ModelTiersInfo {
+    pub fast: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ModelsInfo {
+    pub default_tier: ModelTier,
+    pub tiers: ModelTiersInfo,
+    pub models: Vec<String>,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<AppConfig>,
     pub llm: Arc<dyn ModelProvider>,
     pub db: PgPool,
+    models: Arc<ModelsInfo>,
 }
 
 impl AppState {
@@ -112,28 +155,98 @@ impl AppState {
             );
         }
 
-        Self::with_provider(config, db, Arc::new(router))
+        let models = ModelsInfo {
+            default_tier: router.default_tier(),
+            tiers: ModelTiersInfo {
+                fast: router
+                    .tier_model(ModelTier::Fast)
+                    .unwrap_or(&config.llm_model)
+                    .to_string(),
+                reasoning: router.tier_model(ModelTier::Reasoning).map(str::to_string),
+            },
+            models: router
+                .configured_models()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        };
+
+        Self {
+            config: Arc::new(config),
+            llm: Arc::new(router),
+            db,
+            models: Arc::new(models),
+        }
     }
 
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub fn with_provider(config: AppConfig, db: PgPool, llm: Arc<dyn ModelProvider>) -> Self {
+        let mut models = vec![config.llm_model.clone()];
+        if let Some(reasoning) = &config.llm_reasoning_model
+            && reasoning != &config.llm_model
+        {
+            models.push(reasoning.clone());
+        }
+        models.sort_unstable();
+        let models_info = ModelsInfo {
+            default_tier: ModelTier::Fast,
+            tiers: ModelTiersInfo {
+                fast: config.llm_model.clone(),
+                reasoning: config.llm_reasoning_model.clone(),
+            },
+            models,
+        };
         Self {
             config: Arc::new(config),
             llm,
             db,
+            models: Arc::new(models_info),
         }
+    }
+
+    pub fn models_info(&self) -> &ModelsInfo {
+        &self.models
+    }
+
+    pub fn resolve_model_selection<'a>(
+        &self,
+        tier: Option<ModelTier>,
+        model: Option<&'a str>,
+    ) -> AppResult<ModelSelection<'a>> {
+        let selection = ModelSelection::from_request(tier, model)
+            .map_err(|err| AppError::BadRequest(err.to_string()))?;
+        self.llm
+            .resolve_model(selection)
+            .map_err(|err| AppError::BadRequest(err.to_string()))?;
+        Ok(selection)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ai_core::{ModelSelection, llm::ChatMessage};
+    use ai_core::llm::ChatMessage;
     use axum::{
         Json, Router,
         http::{HeaderMap, header},
         routing::post,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn cors_origin_parser_defaults_and_trims() {
+        assert_eq!(
+            parse_cors_origins(None),
+            vec!["http://localhost:3000", "http://127.0.0.1:3000"]
+        );
+        assert_eq!(
+            parse_cors_origins(Some(
+                " http://localhost:3001/ , , https://app.example.com/ ".to_string()
+            )),
+            vec!["http://localhost:3001", "https://app.example.com"]
+        );
+    }
 
     #[tokio::test]
     async fn reasoning_provider_does_not_leak_fast_key_to_different_host() {
@@ -163,6 +276,7 @@ mod tests {
             AppConfig {
                 app_env: "test".to_string(),
                 port: 0,
+                cors_allow_origins: vec!["http://localhost:3000".to_string()],
                 llm_api_base: "https://api.deepseek.com/v1".to_string(),
                 llm_api_key: "sk-fast-secret".to_string(),
                 llm_model: "deepseek-chat".to_string(),
@@ -221,6 +335,7 @@ mod tests {
             AppConfig {
                 app_env: "test".to_string(),
                 port: 0,
+                cors_allow_origins: vec!["http://localhost:3000".to_string()],
                 llm_api_base: format!("http://{addr}/"),
                 llm_api_key: "sk-shared-key".to_string(),
                 llm_model: "deepseek-chat".to_string(),
