@@ -4,7 +4,7 @@ mod state;
 mod stream;
 
 use crate::error::{AppError, AppResult};
-use ai_core::{SystemInfo, llm::ChatMessage};
+use ai_core::{ModelSelection, ModelTier, SystemInfo, llm::ChatMessage};
 use axum::{
     Json, Router,
     extract::State,
@@ -60,6 +60,10 @@ async fn echo(Json(payload): Json<EchoRequest>) -> AppResult<Json<EchoResponse>>
 #[derive(Deserialize)]
 struct ChatRequest {
     prompt: String,
+    #[serde(default)]
+    tier: Option<ModelTier>,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -76,12 +80,22 @@ async fn chat(
         return Err(AppError::BadRequest("prompt cannot be empty".to_string()));
     }
 
+    let selection = ModelSelection::from_request(payload.tier, payload.model.as_deref())
+        .map_err(|err| AppError::BadRequest(err.to_string()))?;
+    state
+        .llm
+        .resolve_model(selection)
+        .map_err(|err| AppError::BadRequest(err.to_string()))?;
+
     let reply = state
         .llm
-        .chat_completion(&[ChatMessage {
-            role: "user",
-            content: prompt,
-        }])
+        .chat_completion(
+            &[ChatMessage {
+                role: "user",
+                content: prompt,
+            }],
+            selection,
+        )
         .await?;
     Ok(Json(ChatResponse { reply }))
 }
@@ -159,21 +173,27 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
+    fn test_config(reasoning_model: Option<&str>) -> AppConfig {
+        AppConfig {
+            app_env: "test".to_string(),
+            port: 0,
+            llm_api_base: "https://api.deepseek.com/v1".to_string(),
+            llm_api_key: String::new(),
+            llm_model: "deepseek-chat".to_string(),
+            llm_reasoning_model: reasoning_model.map(str::to_string),
+            llm_reasoning_api_base: None,
+            llm_reasoning_api_key: None,
+            database_url: "postgres://test:test@localhost:5432/test".to_string(),
+        }
+    }
+
     fn test_app() -> Router {
         let db = ai_db::connect_lazy("postgres://test:test@localhost:5432/test").unwrap();
         test_app_with_pool(db)
     }
 
     fn test_app_with_pool(db: ai_db::PgPool) -> Router {
-        let config = AppConfig {
-            app_env: "test".to_string(),
-            port: 0,
-            llm_api_base: "https://api.deepseek.com/v1".to_string(),
-            llm_api_key: String::new(),
-            llm_model: "deepseek-chat".to_string(),
-            database_url: "postgres://test:test@localhost:5432/test".to_string(),
-        };
-        build_app(AppState::new(config, db))
+        build_app(AppState::new(test_config(None), db))
     }
 
     #[tokio::test]
@@ -227,6 +247,63 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_chat_dynamic_model_routing_and_validation() {
+        let db = ai_db::connect_lazy("postgres://test:test@localhost:5432/test").unwrap();
+        let app = build_app(AppState::new(test_config(Some("deepseek-reasoner")), db));
+
+        for (body, expected_model) in [
+            (r#"{"prompt":"Hi"}"#, "deepseek-chat"),
+            (r#"{"prompt":"Hi","tier":"fast"}"#, "deepseek-chat"),
+            (r#"{"prompt":"Hi","tier":"reasoning"}"#, "deepseek-reasoner"),
+            (
+                r#"{"prompt":"Hi","model":"deepseek-reasoner"}"#,
+                "deepseek-reasoner",
+            ),
+        ] {
+            let req = Request::builder()
+                .method(Method::POST)
+                .uri("/api/chat")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{body}");
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                json["reply"],
+                format!("[Mock LLM ({expected_model})] You said: Hi")
+            );
+        }
+
+        for invalid_body in [
+            r#"{"prompt":"Hi","model":"   "}"#,
+            r#"{"prompt":"Hi","model":"unknown-model"}"#,
+            r#"{"prompt":"Hi","tier":"fast","model":"deepseek-chat"}"#,
+        ] {
+            let req = Request::builder()
+                .method(Method::POST)
+                .uri("/api/chat")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(invalid_body))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{invalid_body}");
+        }
+
+        // Unconfigured reasoning tier returns 400 Bad Request rather than silently falling back.
+        let fast_only_app = test_app();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/chat")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"prompt":"Hi","tier":"reasoning"}"#))
+            .unwrap();
+        let resp = fast_only_app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[sqlx::test(migrations = "../../migrations")]

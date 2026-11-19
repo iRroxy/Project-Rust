@@ -2,7 +2,7 @@ use crate::{
     error::{AppError, AppResult},
     state::AppState,
 };
-use ai_core::llm::ChatMessage;
+use ai_core::{ModelSelection, ModelTier, llm::ChatMessage};
 use ai_db::models::{Conversation, Message};
 use axum::{
     Json,
@@ -88,6 +88,23 @@ pub async fn list_messages(
 #[derive(Deserialize)]
 pub struct ConversationChatRequest {
     pub prompt: String,
+    #[serde(default)]
+    pub tier: Option<ModelTier>,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+fn resolve_selection<'a>(
+    state: &AppState,
+    payload: &'a ConversationChatRequest,
+) -> AppResult<ModelSelection<'a>> {
+    let selection = ModelSelection::from_request(payload.tier, payload.model.as_deref())
+        .map_err(|err| AppError::BadRequest(err.to_string()))?;
+    state
+        .llm
+        .resolve_model(selection)
+        .map_err(|err| AppError::BadRequest(err.to_string()))?;
+    Ok(selection)
 }
 
 async fn prepare_chat(state: &AppState, id: Uuid, prompt: &str) -> AppResult<Vec<Message>> {
@@ -112,6 +129,7 @@ pub async fn chat(
     Path(id): Path<Uuid>,
     Json(payload): Json<ConversationChatRequest>,
 ) -> AppResult<Json<Message>> {
+    let selection = resolve_selection(&state, &payload)?;
     let history = prepare_chat(&state, id, &payload.prompt).await?;
     let messages: Vec<_> = history
         .iter()
@@ -120,7 +138,7 @@ pub async fn chat(
             content: &message.content,
         })
         .collect();
-    let reply = state.llm.chat_completion(&messages).await?;
+    let reply = state.llm.chat_completion(&messages, selection).await?;
     let saved = ai_db::message::save_message(&state.db, id, "assistant", &reply, None).await?;
     Ok(Json(saved))
 }
@@ -136,6 +154,7 @@ pub async fn chat_stream(
     Path(id): Path<Uuid>,
     Json(payload): Json<ConversationChatRequest>,
 ) -> AppResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
+    let selection = resolve_selection(&state, &payload)?;
     let history = prepare_chat(&state, id, &payload.prompt).await?;
     let messages: Vec<_> = history
         .iter()
@@ -144,7 +163,7 @@ pub async fn chat_stream(
             content: &message.content,
         })
         .collect();
-    let stream = state.llm.chat_stream(&messages).await?;
+    let stream = state.llm.chat_stream(&messages, selection).await?;
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(16);
 
     tokio::spawn(async move {
@@ -152,7 +171,7 @@ pub async fn chat_stream(
             let mut full_response = String::new();
             // Drop the owning upstream stream before awaiting persistence.
             let completed = {
-                tokio::pin!(stream);
+                let mut stream = stream;
                 loop {
                     let next = tokio::select! {
                         biased;
@@ -209,7 +228,7 @@ mod tests {
     use crate::{build_app, state::AppConfig};
     use axum::{Router, body::Body, http::Request, routing::post};
     use eventsource_stream::Eventsource;
-    use http_body_util::BodyDataStream;
+    use http_body_util::{BodyDataStream, BodyExt};
     use std::{sync::Arc, time::Duration};
     use tokio::sync::Notify;
     use tower::ServiceExt;
@@ -221,6 +240,9 @@ mod tests {
             llm_api_base: api_base,
             llm_api_key: api_key,
             llm_model: "test".to_string(),
+            llm_reasoning_model: None,
+            llm_reasoning_api_base: None,
+            llm_reasoning_api_key: None,
             database_url: String::new(),
         };
         build_app(AppState::new(config, pool))
@@ -232,17 +254,38 @@ mod tests {
             .await
             .unwrap();
         let app = test_app(pool.clone(), String::new(), String::new());
-        for (id, prompt, expected) in [
-            (conv.id, "   ", StatusCode::BAD_REQUEST),
-            (Uuid::nil(), "hello", StatusCode::NOT_FOUND),
+        for (path, body, expected) in [
+            (
+                format!("/api/conversations/{}/chat", conv.id),
+                serde_json::json!({ "prompt": "   " }),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                format!("/api/conversations/{}/chat", Uuid::nil()),
+                serde_json::json!({ "prompt": "hello" }),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                format!("/api/conversations/{}/chat", conv.id),
+                serde_json::json!({ "prompt": "hello", "tier": "reasoning" }),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                format!("/api/conversations/{}/chat", conv.id),
+                serde_json::json!({ "prompt": "hello", "model": "unknown-model" }),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                format!("/api/conversations/{}/chat/stream", conv.id),
+                serde_json::json!({ "prompt": "hello", "tier": "fast", "model": "test" }),
+                StatusCode::BAD_REQUEST,
+            ),
         ] {
             let req = Request::builder()
                 .method("POST")
-                .uri(format!("/api/conversations/{id}/chat"))
+                .uri(path)
                 .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({ "prompt": prompt }).to_string(),
-                ))
+                .body(Body::from(body.to_string()))
                 .unwrap();
             let resp = app.clone().oneshot(req).await.unwrap();
             assert_eq!(resp.status(), expected);
@@ -253,6 +296,90 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn chat_routes_reasoning_tier_to_dedicated_provider(pool: ai_db::PgPool) {
+        let fast_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fast_addr = fast_listener.local_addr().unwrap();
+        let fast_app = Router::new().route(
+            "/chat/completions",
+            post(|Json(body): Json<serde_json::Value>| async move {
+                let model = body["model"].as_str().unwrap_or_default();
+                Json(serde_json::json!({
+                    "choices": [{
+                        "finish_reason": "stop",
+                        "message": { "content": format!("fast-upstream:{model}") }
+                    }]
+                }))
+            }),
+        );
+        let fast_task = tokio::spawn(async move {
+            axum::serve(fast_listener, fast_app).await.unwrap();
+        });
+
+        let reasoning_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let reasoning_addr = reasoning_listener.local_addr().unwrap();
+        let reasoning_app = Router::new().route(
+            "/chat/completions",
+            post(|Json(body): Json<serde_json::Value>| async move {
+                let model = body["model"].as_str().unwrap_or_default();
+                Json(serde_json::json!({
+                    "choices": [{
+                        "finish_reason": "stop",
+                        "message": { "content": format!("reasoning-upstream:{model}") }
+                    }]
+                }))
+            }),
+        );
+        let reasoning_task = tokio::spawn(async move {
+            axum::serve(reasoning_listener, reasoning_app)
+                .await
+                .unwrap();
+        });
+
+        let conv = ai_db::conversations::create_conversation(&pool, Some("routing"))
+            .await
+            .unwrap();
+        let config = AppConfig {
+            app_env: "test".to_string(),
+            port: 0,
+            llm_api_base: format!("http://{fast_addr}"),
+            llm_api_key: "fast-key".to_string(),
+            llm_model: "fast-model".to_string(),
+            llm_reasoning_model: Some("flagship-model".to_string()),
+            llm_reasoning_api_base: Some(format!("http://{reasoning_addr}")),
+            llm_reasoning_api_key: Some("reasoning-key".to_string()),
+            database_url: String::new(),
+        };
+        let app = build_app(AppState::new(config, pool.clone()));
+
+        for (body, expected) in [
+            (r#"{"prompt":"daily question"}"#, "fast-upstream:fast-model"),
+            (
+                r#"{"prompt":"hard problem","tier":"reasoning"}"#,
+                "reasoning-upstream:flagship-model",
+            ),
+            (
+                r#"{"prompt":"explicit model","model":"flagship-model"}"#,
+                "reasoning-upstream:flagship-model",
+            ),
+        ] {
+            let req = Request::builder()
+                .method("POST")
+                .uri(format!("/api/conversations/{}/chat", conv.id))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{body}");
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            let message: Message = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(message.content, expected);
+        }
+
+        fast_task.abort();
+        reasoning_task.abort();
     }
 
     #[sqlx::test(migrations = "../../migrations")]

@@ -1,6 +1,12 @@
 pub mod llm;
+pub mod provider;
 pub mod report;
+
 pub use llm::LlmClient;
+pub use provider::{
+    ModelProvider, ModelProviderExt, ModelRouter, ModelSelection, ModelSelectionError, ModelTier,
+    TokenStream,
+};
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]

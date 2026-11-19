@@ -1,3 +1,4 @@
+use crate::provider::{BoxFuture, ModelProvider, ModelSelection, ModelSelectionError, TokenStream};
 use anyhow::{Context, Result, bail};
 use eventsource_stream::Eventsource;
 use futures_util::{Stream, StreamExt};
@@ -33,12 +34,6 @@ pub struct ChatMessage<'a> {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ResponseFormat {
     JsonObject,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct StructuredOutput<T> {
-    result: T,
 }
 
 #[derive(Deserialize)]
@@ -89,7 +84,23 @@ impl LlmClient {
         }
     }
 
+    pub fn api_base(&self) -> &str {
+        &self.api_base
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
     pub async fn chat_completion(&self, messages: &[ChatMessage<'_>]) -> Result<String> {
+        self.chat_completion_with_model(messages, &self.model).await
+    }
+
+    async fn chat_completion_with_model(
+        &self,
+        messages: &[ChatMessage<'_>],
+        model: &str,
+    ) -> Result<String> {
         if self.api_key.is_empty() || self.api_key == "sk-your-key-here" {
             tracing::warn!("LLM_API_KEY not configured, returning mock response");
 
@@ -100,12 +111,12 @@ impl LlmClient {
                 .map(|message| message.content)
                 .unwrap_or_default();
 
-            return Ok(format!("[Mock LLM ({})] You said: {}", self.model, prompt));
+            return Ok(format!("[Mock LLM ({model})] You said: {prompt}"));
         }
 
         let url = format!("{}/chat/completions", self.api_base);
         let req_body = ChatCompletionRequest {
-            model: &self.model,
+            model,
             messages,
             stream: false,
             response_format: None,
@@ -146,6 +157,15 @@ impl LlmClient {
     where
         T: JsonSchema + DeserializeOwned,
     {
+        crate::provider::generate_structured(self, prompt, ModelSelection::Default).await
+    }
+
+    async fn structured_completion_with_model(
+        &self,
+        prompt: &str,
+        schema: &serde_json::Value,
+        model: &str,
+    ) -> Result<serde_json::Value> {
         let prompt = prompt.trim();
         if prompt.is_empty() {
             bail!("Structured output prompt cannot be empty");
@@ -154,12 +174,6 @@ impl LlmClient {
             bail!("LLM_API_KEY is required for structured output");
         }
 
-        // An object envelope also supports arrays, scalars, and nullable Rust types.
-        let schema = serde_json::to_value(schemars::schema_for!(StructuredOutput<T>))?;
-        let validator = jsonschema::options()
-            .should_validate_formats(true)
-            .build(&schema)
-            .map_err(|error| anyhow::anyhow!("Invalid structured output schema: {error}"))?;
         let instruction = format!(
             "Return only valid JSON matching this JSON Schema. \
              Put the requested value in the result field. \
@@ -180,7 +194,7 @@ impl LlmClient {
             .post(format!("{}/chat/completions", self.api_base))
             .bearer_auth(&self.api_key)
             .json(&ChatCompletionRequest {
-                model: &self.model,
+                model,
                 messages: &messages,
                 stream: false,
                 response_format: Some(ResponseFormat::JsonObject),
@@ -209,22 +223,20 @@ impl LlmClient {
             bail!("LLM returned empty structured output");
         }
 
-        let value: serde_json::Value = serde_json::from_str(&choice.message.content)
-            .context("Invalid structured output JSON")?;
-        if let Err(error) = validator.validate(&value) {
-            bail!(
-                "Structured output violates JSON schema at {}",
-                error.instance_path()
-            );
-        }
-        let output: StructuredOutput<T> =
-            serde_json::from_value(value).context("Failed to decode structured output type")?;
-        Ok(output.result)
+        serde_json::from_str(&choice.message.content).context("Invalid structured output JSON")
     }
 
     pub async fn chat_stream(
         &self,
         messages: &[ChatMessage<'_>],
+    ) -> Result<impl Stream<Item = Result<String>> + Send + 'static + use<>> {
+        self.chat_stream_with_model(messages, &self.model).await
+    }
+
+    async fn chat_stream_with_model(
+        &self,
+        messages: &[ChatMessage<'_>],
+        model: &str,
     ) -> Result<impl Stream<Item = Result<String>> + Send + 'static + use<>> {
         if self.api_key.is_empty() || self.api_key == "sk-your-key-here" {
             bail!("LLM_API_KEY is required for real token streaming");
@@ -235,7 +247,7 @@ impl LlmClient {
             .post(format!("{}/chat/completions", self.api_base))
             .bearer_auth(&self.api_key)
             .json(&ChatCompletionRequest {
-                model: &self.model,
+                model,
                 messages,
                 stream: true,
                 response_format: None,
@@ -281,12 +293,76 @@ impl LlmClient {
     }
 }
 
+impl ModelProvider for LlmClient {
+    fn resolve_model(&self, selection: ModelSelection<'_>) -> Result<String, ModelSelectionError> {
+        match selection {
+            ModelSelection::Default => {
+                let trimmed = self.model.trim();
+                if trimmed.is_empty() {
+                    Err(ModelSelectionError::EmptyModel)
+                } else {
+                    Ok(trimmed.to_string())
+                }
+            }
+            ModelSelection::Model(model) => {
+                let trimmed = model.trim();
+                if trimmed.is_empty() {
+                    Err(ModelSelectionError::EmptyModel)
+                } else {
+                    Ok(trimmed.to_string())
+                }
+            }
+            ModelSelection::Tier(tier) => Err(ModelSelectionError::UnconfiguredTier(tier)),
+        }
+    }
+
+    fn chat_completion<'a>(
+        &'a self,
+        messages: &'a [ChatMessage<'a>],
+        selection: ModelSelection<'a>,
+    ) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async move {
+            let model = self.resolve_model(selection)?;
+            self.chat_completion_with_model(messages, &model).await
+        })
+    }
+
+    fn chat_stream<'a>(
+        &'a self,
+        messages: &'a [ChatMessage<'a>],
+        selection: ModelSelection<'a>,
+    ) -> BoxFuture<'a, Result<TokenStream>> {
+        Box::pin(async move {
+            let model = self.resolve_model(selection)?;
+            let stream = self.chat_stream_with_model(messages, &model).await?;
+            Ok(Box::pin(stream) as TokenStream)
+        })
+    }
+
+    fn structured_completion<'a>(
+        &'a self,
+        prompt: &'a str,
+        schema: &'a serde_json::Value,
+        selection: ModelSelection<'a>,
+    ) -> BoxFuture<'a, Result<serde_json::Value>> {
+        Box::pin(async move {
+            let model = self.resolve_model(selection)?;
+            self.structured_completion_with_model(prompt, schema, &model)
+                .await
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::report::TechReport;
-    use axum::{Router, body::Bytes, http::StatusCode, routing::post};
+    use crate::{
+        provider::{ModelProviderExt, ModelTier},
+        report::TechReport,
+    };
+    use axum::{Json, Router, body::Bytes, http::StatusCode, routing::post};
     use serde_json::{Value, json};
+    use std::sync::{Arc, Mutex};
 
     struct Provider(tokio::task::JoinHandle<()>);
 
@@ -446,5 +522,122 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn model_provider_forwards_dynamic_model_in_upstream_payloads() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let seen_models = Arc::new(Mutex::new(Vec::<String>::new()));
+        let recorded = seen_models.clone();
+
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move |Json(payload): Json<Value>| {
+                let recorded = recorded.clone();
+                async move {
+                    let model = payload["model"].as_str().unwrap_or_default().to_string();
+                    recorded.lock().unwrap().push(model.clone());
+                    if payload["stream"].as_bool() == Some(true) {
+                        let sse = format!(
+                            "data: {{\"choices\":[{{\"delta\":{{\"content\":\"stream:{model}\"}}}}]}}\n\ndata: [DONE]\n\n"
+                        );
+                        (
+                            StatusCode::OK,
+                            [("content-type", "text/event-stream")],
+                            Bytes::from(sse),
+                        )
+                    } else if payload.get("response_format").is_some() {
+                        let body = completion(report_value(88));
+                        (
+                            StatusCode::OK,
+                            [("content-type", "application/json")],
+                            Bytes::from(serde_json::to_vec(&body).unwrap()),
+                        )
+                    } else {
+                        let body = json!({"choices": [{
+                            "finish_reason": "stop",
+                            "message": {"content": format!("reply:{model}")}
+                        }]});
+                        (
+                            StatusCode::OK,
+                            [("content-type", "application/json")],
+                            Bytes::from(serde_json::to_vec(&body).unwrap()),
+                        )
+                    }
+                }
+            }),
+        );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let _guard = Provider(task);
+
+        let provider: Arc<dyn ModelProvider> = Arc::new(LlmClient::new(
+            format!("http://{address}"),
+            "local-test-only".into(),
+            "deepseek-chat".into(),
+        ));
+        let messages = [ChatMessage {
+            role: "user",
+            content: "hello",
+        }];
+
+        assert_eq!(
+            provider
+                .chat_completion(&messages, ModelSelection::Default)
+                .await
+                .unwrap(),
+            "reply:deepseek-chat"
+        );
+        assert_eq!(
+            provider
+                .chat_completion(&messages, ModelSelection::Model("deepseek-reasoner"))
+                .await
+                .unwrap(),
+            "reply:deepseek-reasoner"
+        );
+
+        let mut stream = provider
+            .chat_stream(&messages, ModelSelection::Model("deepseek-reasoner"))
+            .await
+            .unwrap();
+        let mut streamed = String::new();
+        while let Some(chunk) = stream.next().await {
+            streamed.push_str(&chunk.unwrap());
+        }
+        assert_eq!(streamed, "stream:deepseek-reasoner");
+
+        let report: TechReport = provider
+            .generate_structured("Assess Rust", ModelSelection::Model("deepseek-reasoner"))
+            .await
+            .unwrap();
+        assert_eq!(report.score, 88);
+
+        // Bare LlmClient rejects empty model and unconfigured tier before sending HTTP requests.
+        assert_eq!(
+            provider.resolve_model(ModelSelection::Model("   ")),
+            Err(ModelSelectionError::EmptyModel)
+        );
+        assert_eq!(
+            provider.resolve_model(ModelSelection::Tier(ModelTier::Reasoning)),
+            Err(ModelSelectionError::UnconfiguredTier(ModelTier::Reasoning))
+        );
+        assert!(
+            provider
+                .chat_completion(&messages, ModelSelection::Tier(ModelTier::Reasoning))
+                .await
+                .is_err()
+        );
+
+        assert_eq!(
+            seen_models.lock().unwrap().clone(),
+            vec![
+                "deepseek-chat",
+                "deepseek-reasoner",
+                "deepseek-reasoner",
+                "deepseek-reasoner",
+            ]
+        );
     }
 }
