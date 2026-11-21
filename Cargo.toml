@@ -31,6 +31,10 @@ async-stream = "0.3"
 schemars = "1"
 jsonschema = { version = "0.61", default-features = false }
 pulldown-cmark = { version = "0.13", default-features = false, features = ["simd"] }
+tree-sitter = "0.25"
+tree-sitter-rust = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-python = "0.23"
 
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "macros", "migrate"] }
 uuid = { version = "1", features = ["v4", "serde"] }

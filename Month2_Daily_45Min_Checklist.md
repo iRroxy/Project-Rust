@@ -20,7 +20,7 @@
     3. 编写单元测试验证带复杂格式的 Markdown 文档解析准确性。
   - **验收 Commit**：`git commit -m "feat(parser): init ai-parser crate and implement streaming markdown parser"`
 
-- [ ] **Day 32：集成 `tree-sitter` 实现代码 AST 语法树解析与符号提取**
+- [x] **Day 32：集成 `tree-sitter` 实现代码 AST 语法树解析与符号提取**
   - **10 min 速览**：理解 `tree-sitter` 增量语法解析和 S-expression 查询（Queries）语法。
   - **30 min 实战**：
     1. 引入 `tree-sitter` 及语言解析器（Rust、TypeScript、Python）。

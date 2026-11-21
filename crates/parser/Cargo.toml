@@ -5,4 +5,9 @@ edition.workspace = true
 
 [dependencies]
 serde = { workspace = true }
+thiserror = { workspace = true }
 pulldown-cmark = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-rust = { workspace = true }
+tree-sitter-typescript = { workspace = true }
+tree-sitter-python = { workspace = true }
