@@ -51,7 +51,7 @@
     3. 编写 API 接口集成测试。
   - **验收 Commit**：`git commit -m "feat(server): add document parse endpoint with structured response"`
 
-- [ ] **Day 36：前端 Next.js 接入文档拖拽上传与 AST 符号树 / 结构化目录可视化预览**
+- [x] **Day 36：前端 Next.js 接入文档拖拽上传与 AST 符号树 / 结构化目录可视化预览**
   - **10 min 速览**：学习 HTML5 拖拽上传与 Lucide 图标符号树展示。
   - **30 min 实战**：
     1. 在前端新建文档解析页面 `/documents`。

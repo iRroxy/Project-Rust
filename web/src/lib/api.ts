@@ -3,6 +3,8 @@ import type {
   Message,
   ModelsInfo,
   ModelTier,
+  ParseBatchResponse,
+  ParseDocumentResponse,
   TechReport,
 } from "@/types/api";
 
@@ -61,6 +63,18 @@ export const api = {
     request<TechReport>("/api/analyze", {
       method: "POST",
       body: JSON.stringify({ prompt, tier, model }),
+    }),
+
+  parseDocument: (filename: string, content: string) =>
+    request<ParseDocumentResponse>("/api/documents/parse", {
+      method: "POST",
+      body: JSON.stringify({ filename, content }),
+    }),
+
+  parseDocumentsBatch: (files: Array<{ filename: string; content: string }>) =>
+    request<ParseBatchResponse>("/api/documents/parse-batch", {
+      method: "POST",
+      body: JSON.stringify({ files }),
     }),
 };
 

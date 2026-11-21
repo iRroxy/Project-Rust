@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useState, useRef, useCallback } from "react";
+import Link from "next/link";
 import {
   Plus,
   Trash2,
@@ -13,6 +14,7 @@ import {
   Cpu,
   MessageSquare,
   AlertCircle,
+  FileCode2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -333,6 +335,20 @@ export default function WorkspacePage() {
             </div>
           )}
         </ScrollArea>
+
+        {/* Navigation to AST Document Parser */}
+        <div className="border-t p-2">
+          <Link href="/documents" className="block">
+            <Button
+              size="sm"
+              variant="ghost"
+              className="w-full justify-start gap-2 text-xs text-muted-foreground hover:text-foreground"
+            >
+              <FileCode2 className="h-3.5 w-3.5 text-primary" />
+              <span>文档与代码 AST 解析</span>
+            </Button>
+          </Link>
+        </div>
 
         {/* Engine status banner */}
         <div className="border-t p-3 text-[11px] text-muted-foreground">
