@@ -44,3 +44,4 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 ai-db = { path = "crates/db" }
 ai-core = { path = "crates/core" }
+ai-parser = { path = "crates/parser" }

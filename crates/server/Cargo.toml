@@ -12,6 +12,7 @@ tracing-subscriber.workspace = true
 axum.workspace = true
 dotenvy.workspace = true
 ai-core.workspace = true
+ai-parser.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tower-http.workspace = true
@@ -19,6 +20,7 @@ ai-db.workspace = true
 sqlx.workspace = true
 uuid.workspace = true
 tokio-stream.workspace = true
+rayon.workspace = true
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

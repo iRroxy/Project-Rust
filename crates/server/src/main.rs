@@ -1,4 +1,5 @@
 mod conversations;
+mod documents;
 mod error;
 mod state;
 mod stream;
@@ -10,7 +11,7 @@ use crate::{
 use ai_core::{ModelTier, SystemInfo, llm::ChatMessage, report::TechReport};
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderValue, Method, StatusCode, header},
     routing::{delete, get, post},
 };
@@ -192,6 +193,11 @@ pub fn build_app(state: AppState) -> Router {
         .route(
             "/api/conversations/{id}/chat/stream",
             post(conversations::chat_stream),
+        )
+        .route("/api/documents/parse", post(documents::parse_document))
+        .route(
+            "/api/documents/parse-batch",
+            post(documents::parse_documents_batch).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
         )
         .route("/api/stream-demo", get(stream::demo))
         .layer(TraceLayer::new_for_http())

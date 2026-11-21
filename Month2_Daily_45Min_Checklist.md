@@ -43,7 +43,7 @@
     3. 实现 `DiffCalculator`：通过哈希集合比对，精准找出新增（Added）、修改（Modified）、未变更（Unchanged）的文件与段落。
   - **验收 Commit**：`git commit -m "feat(parser): add blake3 document fingerprinting and incremental diffing"`
 
-- [ ] **Day 35：在 `crates/server` 中开辟文档摄入与结构化解析接口 (`POST /api/documents/parse`)**
+- [x] **Day 35：在 `crates/server` 中开辟文档摄入与结构化解析接口 (`POST /api/documents/parse`)**
   - **10 min 速览**：学习 Axum `multipart/form-data` 大文件分块上传或纯文本 JSON 批量提交。
   - **30 min 实战**：
     1. 在 `crates/server` 引入 `ai-parser` 依赖。
