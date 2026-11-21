@@ -59,7 +59,7 @@
     3. 渲染解析出的 Markdown 标题大纲树与代码函数/结构体符号列表。
   - **验收 Commit**：`git commit -m "feat(web): add document upload and parsed AST outline preview"`
 
-- [ ] **Day 37：第五周集成基准测试：压测 Rust 并发 AST 解析器吞吐性能**
+- [x] **Day 37：第五周集成基准测试：压测 Rust 并发 AST 解析器吞吐性能**
   - **45 min 实战**：
     1. 编写压测脚本（或集成测试），并行解析 500 个代码与 Markdown 文件。
     2. 记录吞吐量（MB/s）、CPU 占用与峰值内存。
