@@ -23,6 +23,7 @@ cargo run -p ai-server
 | --- | --- | --- |
 | GET | `/api/health` | 服务状态与版本 |
 | GET | `/api/models` | 当前默认档位、各档位绑定模型与可用模型列表 |
+| POST | `/api/analyze` | `{"prompt":"评估..."}`；强类型 JSON Schema 技术深度分析报告 |
 | POST | `/api/echo` | `{"message":"Hello Rust"}` |
 | POST | `/api/chat` | `{"prompt":"Hello Rust"}`（可选 `tier` 或 `model`） |
 | POST | `/api/conversations` | `{"title":"first chat"}`；创建会话，返回 201 |
@@ -239,6 +240,41 @@ HTTP 错误、空 choices、模型拒绝、非 `stop` 的结束原因、空白�
 ```powershell
 curl.exe -N http://127.0.0.1:3000/api/stream-demo
 ```
+
+## Next.js 前端应用 (web/)
+
+基于 Next.js 16 (App Router) + Tailwind CSS + shadcn/ui 构建的高颜值、生产级 AI 工作台界面：
+
+- **左右分栏布局**：左侧边栏会话历史 CRUD（新建、切换、级联删除），右侧主区域对话滚动与多行输入框。
+- **SSE 打字机输出**：基于浏览器原生 `ReadableStream` 逐字渲染流式 Token，右上角动态切换“日常 (Fast)”与“推理 (Reasoning)”模型路由。
+- **即时断开与中止**：界面提供“停止生成”按钮（绑定 `AbortController`），秒级联动后端中断上游流并安全落库。
+- **Markdown & 代码高亮**：支持表格、GFM 规范并自带代码块右上角“一键复制”。
+- **Generative UI**：支持“深度分析模式”，直接调用 `/api/analyze` 并渲染带进度条、优缺点对比的强类型 `TechReport` 可视化卡片。
+
+本地单独启动前端：
+
+```powershell
+cd web
+npm install
+npm run dev
+```
+
+前端默认运行在 `http://localhost:3000`（或 `http://localhost:3001`），自动通过 CORS 请求后端。
+
+## 生产多阶段 Docker 构建与全栈编排
+
+项目提供生产级极小容器编排配置（`docker-compose.yml`）：
+- **`postgres`**：带 `pgvector` 插件的 PostgreSQL 16 数据库。
+- **`rust-server`**：多阶段构建（基于 `rust:1.85-slim` 编译 Release 二进制，运行于极简 `debian:bookworm-slim`，带健康检查）。
+- **`nextjs-web`**：多阶段构建（基于 `node:20-alpine` 编译优化，非 root 运行）。
+
+一键构建并启动三层全栈架构：
+
+```powershell
+docker compose up -d --build
+```
+
+访问 `http://localhost:8080` 即可使用完整前端界面，后端暴露于 `http://localhost:3000`。
 
 ## 并发流式内存基准
 

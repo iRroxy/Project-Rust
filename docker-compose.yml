@@ -16,5 +16,34 @@ services:
       retries: 10
       start_period: 10s
 
+  rust-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    environment:
+      APP_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgres://ai_saas:ai_saas_dev@postgres:5432/ai_saas
+      LLM_API_BASE: ${LLM_API_BASE:-https://api.deepseek.com/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
+      CORS_ALLOW_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8080"
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  nextjs-web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    environment:
+      NEXT_PUBLIC_API_BASE: "http://127.0.0.1:3000"
+    ports:
+      - "127.0.0.1:8080:3000"
+    depends_on:
+      - rust-server
+
 volumes:
   postgres_data:

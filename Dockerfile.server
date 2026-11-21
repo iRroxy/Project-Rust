@@ -1,0 +1,55 @@
+# ------------------------------------------------------------------------------
+# Stage 1: Build the Rust backend binary with cached dependencies
+# ------------------------------------------------------------------------------
+FROM rust:1.85-slim-bookworm AS builder
+
+WORKDIR /app
+
+# Install build dependencies including OpenSSL/pkg-config if needed by crates
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy workspace manifests
+COPY Cargo.toml Cargo.lock ./
+COPY crates/core/Cargo.toml crates/core/Cargo.toml
+COPY crates/db/Cargo.toml crates/db/Cargo.toml
+COPY crates/server/Cargo.toml crates/server/Cargo.toml
+
+# Copy source code and offline SQLx metadata
+COPY crates crates
+COPY migrations migrations
+COPY .sqlx .sqlx
+
+# Build server binary in release mode using offline metadata
+ENV SQLX_OFFLINE=true
+RUN cargo build --release -p ai-server
+
+# ------------------------------------------------------------------------------
+# Stage 2: Minimal runtime image
+# ------------------------------------------------------------------------------
+FROM debian:bookworm-slim AS runner
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -m -u 1000 appuser
+
+COPY --from=builder /app/target/release/ai-server /usr/local/bin/ai-server
+
+USER appuser
+
+EXPOSE 3000
+
+ENV APP_ENV=production \
+    PORT=3000 \
+    RUST_LOG=info
+
+HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
+  CMD curl -f http://127.0.0.1:3000/api/health || exit 1
+
+ENTRYPOINT ["/usr/local/bin/ai-server"]
