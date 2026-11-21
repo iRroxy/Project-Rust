@@ -7,7 +7,7 @@ use crate::{
     error::{AppError, AppResult},
     state::{AppConfig, AppState, ModelsInfo},
 };
-use ai_core::{ModelTier, SystemInfo, llm::ChatMessage};
+use ai_core::{ModelTier, SystemInfo, llm::ChatMessage, report::TechReport};
 use axum::{
     Json, Router,
     extract::State,
@@ -37,6 +37,31 @@ async fn health_check(State(state): State<AppState>) -> AppResult<Json<HealthRes
 
 async fn list_models(State(state): State<AppState>) -> AppResult<Json<ModelsInfo>> {
     Ok(Json(state.models_info().clone()))
+}
+
+#[derive(Deserialize)]
+struct AnalyzeRequest {
+    prompt: String,
+    #[serde(default)]
+    tier: Option<ModelTier>,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// POST /api/analyze - Generates a validated structured TechReport
+async fn analyze(
+    State(state): State<AppState>,
+    Json(payload): Json<AnalyzeRequest>,
+) -> AppResult<Json<TechReport>> {
+    let prompt = payload.prompt.trim();
+    if prompt.is_empty() {
+        return Err(AppError::BadRequest("prompt cannot be empty".to_string()));
+    }
+
+    let selection = state.resolve_model_selection(payload.tier, payload.model.as_deref())?;
+    let report: TechReport =
+        ai_core::provider::generate_structured(&*state.llm, prompt, selection).await?;
+    Ok(Json(report))
 }
 
 #[derive(Deserialize)]
@@ -148,6 +173,7 @@ pub fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health_check))
         .route("/api/models", get(list_models))
+        .route("/api/analyze", post(analyze))
         .route("/api/echo", post(echo))
         .route("/api/chat", post(chat))
         .route(
@@ -292,6 +318,19 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_analyze_endpoint_validation() {
+        let app = test_app();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/analyze")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"prompt": "   "}"#))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
