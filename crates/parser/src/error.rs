@@ -12,6 +12,9 @@ pub enum ParseError {
     #[error("tree-sitter failed to produce a syntax tree")]
     ParseFailed,
 
+    #[error("BPE tokenizer decode error: {0}")]
+    TokenizerDecode(String),
+
     #[error("I/O error while reading source: {0}")]
     Io(#[from] std::io::Error),
 }

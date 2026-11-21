@@ -72,7 +72,7 @@
 
 **本周目标**：引入 HuggingFace 原生分词器，告别粗暴的按字符截断，构建感知标题层级与代码语法结构的语义切块器（Semantic Chunker）。
 
-- [ ] **Day 38：集成 HuggingFace `tokenizers` Rust 官方库与 BPE 分词**
+- [x] **Day 38：集成 HuggingFace `tokenizers` Rust 官方库与 BPE 分词**
   - **10 min 速览**：了解 Byte-Pair Encoding (BPE) 原理与主流 LLM（OpenAI cl100k_base / o200k_base / Llama）分词模型。
   - **30 min 实战**：
     1. 引入 `tokenizers` crate（或者 `tiktoken-rs` 轻量预编译包）。

@@ -3,6 +3,7 @@ pub mod error;
 pub mod fingerprint;
 pub mod markdown;
 pub mod scanner;
+pub mod tokenizer;
 
 pub use code::{CodeParser, CodeSymbol, ParsedCode, SupportedLanguage, SymbolKind};
 pub use error::ParseError;
@@ -11,3 +12,4 @@ pub use fingerprint::{
 };
 pub use markdown::{CodeBlock, MarkdownParser, MarkdownSection, ParsedMarkdown};
 pub use scanner::{DocumentContent, ParsedDocument, RepositoryScanner, ScanConfig, ScanReport};
+pub use tokenizer::{TokenCounter, TokenizerEncoding};
