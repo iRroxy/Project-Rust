@@ -28,7 +28,7 @@
     3. 编写针对 Rust 和 TypeScript 代码文件的解析单元测试。
   - **验收 Commit**：`git commit -m "feat(parser): add tree-sitter AST symbol extractor for code files"`
 
-- [ ] **Day 33：利用 `rayon` 与 `tokio::task::JoinSet` 实现大目录文件并发扫描与解析**
+- [x] **Day 33：利用 `rayon` 与 `tokio::task::JoinSet` 实现大目录文件并发扫描与解析**
   - **10 min 速览**：理解 CPU 密集型任务（AST 解析）与 I/O 任务（文件读取）在 Tokio 与 Rayon 之间的线程池划分。
   - **30 min 实战**：
     1. 引入 `rayon` 与 `ignore`（或 `walkdir`，支持 `.gitignore` 过滤）。
