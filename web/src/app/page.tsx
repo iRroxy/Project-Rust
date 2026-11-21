@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useRef, useCallback } from "react";
 import {
   Plus,
   Trash2,
@@ -59,6 +59,31 @@ export default function WorkspacePage() {
     scrollToBottom();
   }, [messages, structuredReport, isStreaming]);
 
+  const loadConversations = useCallback(async () => {
+    try {
+      const list = await api.listConversations();
+      setConversations(list);
+      if (list.length > 0) {
+        setActiveId((prev) => prev ?? list[0].id);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setErrorMsg(`获取会话列表失败: ${msg}`);
+    }
+  }, []);
+
+  const loadMessages = useCallback(async (convId: string) => {
+    try {
+      setErrorMsg(null);
+      const history = await api.listMessages(convId);
+      setMessages(history);
+      setStructuredReport(null);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setErrorMsg(`加载消息历史失败: ${msg}`);
+    }
+  }, []);
+
   // Load models metadata and conversation list on mount
   useEffect(() => {
     api
@@ -72,42 +97,15 @@ export default function WorkspacePage() {
       })
       .catch((err) => console.warn("Could not fetch models metadata:", err));
 
-    loadConversations();
-  }, []);
+    void loadConversations();
+  }, [loadConversations]);
 
   // When active conversation changes, load its message history
   useEffect(() => {
-    if (!activeId) {
-      setMessages([]);
-      return;
+    if (activeId) {
+      void loadMessages(activeId);
     }
-    loadMessages(activeId);
-  }, [activeId]);
-
-  const loadConversations = async () => {
-    try {
-      const list = await api.listConversations();
-      setConversations(list);
-      if (list.length > 0 && !activeId) {
-        setActiveId(list[0].id);
-      }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setErrorMsg(`获取会话列表失败: ${msg}`);
-    }
-  };
-
-  const loadMessages = async (convId: string) => {
-    try {
-      setErrorMsg(null);
-      const history = await api.listMessages(convId);
-      setMessages(history);
-      setStructuredReport(null);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setErrorMsg(`加载消息历史失败: ${msg}`);
-    }
-  };
+  }, [activeId, loadMessages]);
 
   const handleNewConversation = async () => {
     try {
@@ -130,7 +128,11 @@ export default function WorkspacePage() {
       const updated = conversations.filter((c) => c.id !== convId);
       setConversations(updated);
       if (activeId === convId) {
-        setActiveId(updated.length > 0 ? updated[0].id : null);
+        const nextId = updated.length > 0 ? updated[0].id : null;
+        setActiveId(nextId);
+        if (!nextId) {
+          setMessages([]);
+        }
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -188,11 +190,9 @@ export default function WorkspacePage() {
       }
     }
 
-    const convIdForMessage = currentConvId;
-
     const optimisticUserMessage: Message = {
       id: "temp-user-" + Date.now(),
-      conversation_id: convIdForMessage,
+      conversation_id: currentConvId,
       role: "user",
       content: prompt,
       token_count: null,
@@ -201,7 +201,7 @@ export default function WorkspacePage() {
 
     const optimisticAssistantMessage: Message = {
       id: "temp-assistant-" + Date.now(),
-      conversation_id: convIdForMessage,
+      conversation_id: currentConvId,
       role: "assistant",
       content: "",
       token_count: null,
@@ -216,7 +216,7 @@ export default function WorkspacePage() {
 
     try {
       await streamConversationChat(
-        convIdForMessage,
+        currentConvId,
         prompt,
         {
           tier: selectedTier,
