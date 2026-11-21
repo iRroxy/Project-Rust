@@ -14,3 +14,4 @@ tree-sitter-typescript = { workspace = true }
 tree-sitter-python = { workspace = true }
 rayon = { workspace = true }
 ignore = { workspace = true }
+blake3 = { workspace = true }

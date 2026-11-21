@@ -35,7 +35,7 @@
     2. 实现 `RepositoryScanner`：多线程扫描代码目录，并发解析所有支持的文档与代码文件，输出统一的 `ParsedDocument` 集合。
   - **验收 Commit**：`git commit -m "feat(parser): implement multi-threaded repository scanner with rayon"`
 
-- [ ] **Day 34：引入 `blake3` 极速哈希计算，实现文档指纹与零冗余增量变更比对**
+- [x] **Day 34：引入 `blake3` 极速哈希计算，实现文档指纹与零冗余增量变更比对**
   - **10 min 速览**：了解 Blake3 算法（SIMD 优化、树状哈希，比 SHA-256 快数十倍）的高速哈希特性。
   - **30 min 实战**：
     1. 引入 `blake3` crate。

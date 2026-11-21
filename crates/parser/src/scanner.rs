@@ -10,6 +10,7 @@ use tracing::warn;
 
 use crate::code::{CodeParser, ParsedCode, SupportedLanguage};
 use crate::error::ParseError;
+use crate::fingerprint::hash_text;
 use crate::markdown::{MarkdownParser, ParsedMarkdown};
 
 /// Structured payload of a parsed document.
@@ -26,6 +27,7 @@ pub enum DocumentContent {
 pub struct ParsedDocument {
     pub path: String,
     pub size_bytes: usize,
+    pub content_hash: String,
     pub content: DocumentContent,
 }
 
@@ -95,6 +97,7 @@ impl RepositoryScanner {
         Ok(ParsedDocument {
             path: normalize_path(filename),
             size_bytes: text.len(),
+            content_hash: hash_text(text),
             content,
         })
     }
@@ -225,6 +228,7 @@ mod tests {
         let md = RepositoryScanner::parse_content("docs/README.md", "# Hello\nWorld")
             .expect("md should parse");
         assert_eq!(md.path, "docs/README.md");
+        assert_eq!(md.content_hash.len(), 64);
         assert!(matches!(md.content, DocumentContent::Markdown(_)));
 
         let rs = RepositoryScanner::parse_content("src\\main.rs", "pub fn main() {}")
@@ -244,7 +248,7 @@ mod tests {
 
         let report =
             RepositoryScanner::scan_directory(&src_dir).expect("scanning parser src should work");
-        assert!(report.documents.len() >= 4);
+        assert!(report.documents.len() >= 5);
         assert!(report.total_bytes > 0);
         assert!(
             report
