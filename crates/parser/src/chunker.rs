@@ -109,10 +109,13 @@ impl SemanticChunker {
                     continue;
                 }
                 let text = self.format_with_prefix(&section.breadcrumbs, &section.title);
-                let final_text = if self.counter.count(&text) > self.config.max_tokens {
-                    self.counter.truncate(&text, self.config.max_tokens)
+                let raw_count = self.counter.count(&text);
+                let (final_text, final_count) = if raw_count > self.config.max_tokens {
+                    let t = self.counter.truncate(&text, self.config.max_tokens);
+                    let c = self.counter.count(&t);
+                    (t, c)
                 } else {
-                    text
+                    (text, raw_count)
                 };
                 out.push(self.build_chunk(
                     out.len(),
@@ -120,6 +123,7 @@ impl SemanticChunker {
                     section.level,
                     final_text,
                     section.title.clone(),
+                    final_count,
                 ));
             }
             return out;
@@ -168,6 +172,7 @@ impl SemanticChunker {
                                 updated.heading_level,
                                 updated.full_content,
                                 updated.raw_content,
+                                updated.token_count,
                             ));
                         }
                         continue;
@@ -181,6 +186,7 @@ impl SemanticChunker {
                     prev.heading_level,
                     prev.full_content,
                     prev.raw_content,
+                    prev.token_count,
                 ));
             }
 
@@ -201,6 +207,7 @@ impl SemanticChunker {
                         item.heading_level,
                         item.full_content,
                         item.raw_content,
+                        item.token_count,
                     ));
                 }
             } else {
@@ -208,10 +215,13 @@ impl SemanticChunker {
                 let split_bodies = self.split_oversized_section(&section.breadcrumbs, body);
                 for piece in split_bodies {
                     let formatted = self.format_with_prefix(&section.breadcrumbs, &piece);
-                    let bounded = if self.counter.count(&formatted) > self.config.max_tokens {
-                        self.counter.truncate(&formatted, self.config.max_tokens)
+                    let formatted_count = self.counter.count(&formatted);
+                    let (bounded, bounded_count) = if formatted_count > self.config.max_tokens {
+                        let t = self.counter.truncate(&formatted, self.config.max_tokens);
+                        let c = self.counter.count(&t);
+                        (t, c)
                     } else {
-                        formatted
+                        (formatted, formatted_count)
                     };
                     chunks.push(self.build_chunk(
                         chunks.len(),
@@ -219,6 +229,7 @@ impl SemanticChunker {
                         section.level,
                         bounded,
                         piece,
+                        bounded_count,
                     ));
                 }
             }
@@ -231,6 +242,7 @@ impl SemanticChunker {
                 prev.heading_level,
                 prev.full_content,
                 prev.raw_content,
+                prev.token_count,
             ));
         }
 
@@ -446,8 +458,8 @@ impl SemanticChunker {
         heading_level: u8,
         content: String,
         raw_content: String,
+        token_count: usize,
     ) -> SemanticChunk {
-        let token_count = self.counter.count(&content);
         let content_hash = hash_text(&content);
         SemanticChunk {
             chunk_index,

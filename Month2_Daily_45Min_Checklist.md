@@ -116,7 +116,7 @@
     2. 支持动态调节 Chunk Size / Overlap 滑块并即时查看切块结果。
   - **验收 Commit**：`git commit -m "feat(web): add interactive chunk inspector and size tuning UI"`
 
-- [ ] **Day 44：第六周分块引擎内存与吞吐基准压测**
+- [x] **Day 44：第六周分块引擎内存与吞吐基准压测**
   - **45 min 实战**：
     1. 编写对 10MB+ 长文档和万行源码切块的性能测试。
     2. 验证多线程切块吞吐量并确认内存开销始终在 20MB 以内。

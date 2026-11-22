@@ -280,15 +280,11 @@ impl DocumentChunker {
         match &doc.content {
             DocumentContent::Markdown(md) => {
                 let chunks = self.markdown_chunker.chunk_markdown(md);
-                let mut search_cursor = 0usize;
+                let mut locator = OffsetLocator::new(raw_source);
                 chunks
                     .into_iter()
                     .map(|chunk| {
-                        let (byte_range, line_range) = locate_snippet_offsets(
-                            raw_source,
-                            &chunk.raw_content,
-                            &mut search_cursor,
-                        );
+                        let (byte_range, line_range) = locator.locate(&chunk.raw_content);
                         let chunk_id =
                             derive_chunk_id(file_id, chunk.chunk_index, &chunk.content_hash);
                         DocumentChunk {
@@ -364,13 +360,12 @@ impl DocumentChunker {
                     self.config.max_tokens,
                     self.config.overlap_tokens,
                 );
-                let mut search_cursor = 0usize;
+                let mut locator = OffsetLocator::new(raw_source);
                 pieces
                     .into_iter()
                     .enumerate()
                     .map(|(chunk_index, text)| {
-                        let (byte_range, line_range) =
-                            locate_snippet_offsets(raw_source, &text, &mut search_cursor);
+                        let (byte_range, line_range) = locator.locate(&text);
                         let token_count = self.counter.count(&text);
                         let content_hash = hash_text(&text);
                         let chunk_id = derive_chunk_id(file_id, chunk_index, &content_hash);
@@ -414,65 +409,91 @@ fn derive_chunk_id(file_id: &str, chunk_index: usize, content_hash: &str) -> Str
     hasher.finalize().to_hex()[..32].to_string()
 }
 
-/// Locate approximate UTF-8 byte offsets and 1-indexed line range of `snippet` inside `source`.
-fn locate_snippet_offsets(
-    source: &str,
-    snippet: &str,
-    cursor: &mut usize,
-) -> (ByteRange, Option<LineRange>) {
-    if source.is_empty() || snippet.is_empty() {
-        return (ByteRange { start: 0, end: 0 }, None);
+/// Incremental O(N) snippet byte-offset and 1-indexed line-number locator.
+struct OffsetLocator<'a> {
+    source: &'a str,
+    cursor_byte: usize,
+    cursor_line: usize,
+}
+
+impl<'a> OffsetLocator<'a> {
+    fn new(source: &'a str) -> Self {
+        Self {
+            source,
+            cursor_byte: 0,
+            cursor_line: 1,
+        }
     }
 
-    let search_slice = source.get(*cursor..).unwrap_or(source);
-    let anchor = snippet
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or(snippet);
+    fn locate(&mut self, snippet: &str) -> (ByteRange, Option<LineRange>) {
+        if self.source.is_empty() || snippet.is_empty() {
+            return (ByteRange { start: 0, end: 0 }, None);
+        }
 
-    let found_start = search_slice
-        .find(snippet)
-        .map(|rel| *cursor + rel)
-        .or_else(|| search_slice.find(anchor).map(|rel| *cursor + rel))
-        .or_else(|| source.find(anchor));
+        let search_slice = self.source.get(self.cursor_byte..).unwrap_or(self.source);
+        let anchor = snippet
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or(snippet);
 
-    match found_start {
-        Some(start) => {
-            let end = (start + snippet.len()).min(source.len());
-            // Snap `end` to a valid UTF-8 char boundary
-            let mut safe_end = end;
-            while safe_end < source.len() && !source.is_char_boundary(safe_end) {
-                safe_end += 1;
+        // Search forward from cursor using the first non-empty line anchor for O(1) locality
+        let found_start = search_slice
+            .find(anchor)
+            .map(|rel| self.cursor_byte + rel)
+            .or_else(|| self.source.find(anchor));
+
+        match found_start {
+            Some(start) => {
+                let end = (start + snippet.len()).min(self.source.len());
+                let mut safe_end = end;
+                while safe_end < self.source.len() && !self.source.is_char_boundary(safe_end) {
+                    safe_end += 1;
+                }
+
+                let start_line = if start >= self.cursor_byte {
+                    self.cursor_line
+                        + self.source[self.cursor_byte..start]
+                            .bytes()
+                            .filter(|&b| b == b'\n')
+                            .count()
+                } else {
+                    1 + self.source[..start]
+                        .bytes()
+                        .filter(|&b| b == b'\n')
+                        .count()
+                };
+
+                self.cursor_byte = start.min(self.source.len());
+                self.cursor_line = start_line;
+
+                let extra_lines = self.source[start..safe_end]
+                    .bytes()
+                    .filter(|&b| b == b'\n')
+                    .count();
+                let end_line = start_line + extra_lines;
+                (
+                    ByteRange {
+                        start,
+                        end: safe_end,
+                    },
+                    Some(LineRange {
+                        start: start_line,
+                        end: end_line,
+                    }),
+                )
             }
-            *cursor = start.min(source.len());
-            let start_line = 1 + source[..start].bytes().filter(|&b| b == b'\n').count();
-            let extra_lines = source[start..safe_end]
-                .bytes()
-                .filter(|&b| b == b'\n')
-                .count();
-            let end_line = start_line + extra_lines;
-            (
+            None => (
                 ByteRange {
-                    start,
-                    end: safe_end,
+                    start: 0,
+                    end: self.source.len(),
                 },
                 Some(LineRange {
-                    start: start_line,
-                    end: end_line,
+                    start: 1,
+                    end: self.source.lines().count().max(1),
                 }),
-            )
+            ),
         }
-        None => (
-            ByteRange {
-                start: 0,
-                end: source.len(),
-            },
-            Some(LineRange {
-                start: 1,
-                end: source.lines().count().max(1),
-            }),
-        ),
     }
 }
 
