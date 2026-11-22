@@ -157,7 +157,7 @@
     2. 实现批量入库 `batch_insert_chunks(pool, chunks)`，并支持基于 chunk_hash 的冲突跳过或更新（ON CONFLICT DO UPDATE）。
   - **验收 Commit**：`git commit -m "feat(db): implement ChunkRepository for bulk vector upsert"`
 
-- [ ] **Day 49：编写 Top-K 向量余弦距离搜索方法与相似度过滤**
+- [x] **Day 49：编写 Top-K 向量余弦距离搜索方法与相似度过滤**
   - **10 min 速览**：学习 pgvector 的余弦距离操作符 `<=>` 与内积 `<#>`，以及距离到相似度（$1 - \text{distance}$）的转换。
   - **30 min 实战**：
     1. 在 `ChunkRepository` 中编写 `search_similar_chunks(pool, query_vector, limit, min_similarity)`。

@@ -5,7 +5,8 @@ pub mod models;
 
 pub use chunks::{
     BatchUpsertSummary, ChunkRepoError, ChunkRepository, DEFAULT_UPSERT_BATCH_SIZE,
-    EMBEDDING_DIMENSIONS, NewDocumentChunk, StoredDocumentChunk, format_pgvector,
+    EMBEDDING_DIMENSIONS, MAX_SEARCH_LIMIT, NewDocumentChunk, SimilarChunk, StoredDocumentChunk,
+    cosine_similarity, format_pgvector,
 };
 pub use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;

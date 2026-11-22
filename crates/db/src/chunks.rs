@@ -13,11 +13,17 @@ pub const EMBEDDING_DIMENSIONS: usize = 1536;
 /// query parameters and transaction working memory bounded.
 pub const DEFAULT_UPSERT_BATCH_SIZE: usize = 250;
 
+/// Maximum Top-K neighbors returned by a single vector similarity search.
+pub const MAX_SEARCH_LIMIT: usize = 100;
+
 /// Errors returned by [`ChunkRepository`].
 #[derive(Debug, Error)]
 pub enum ChunkRepoError {
     #[error("invalid chunk at index {index}: {reason}")]
     InvalidChunk { index: usize, reason: String },
+
+    #[error("invalid vector search query: {0}")]
+    InvalidQuery(String),
 
     #[error(
         "embedding dimension mismatch at chunk index {index}: expected {expected}, got {actual}"
@@ -61,6 +67,24 @@ pub struct StoredDocumentChunk {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Ranked vector search hit returned by [`ChunkRepository::search_similar_chunks`].
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct SimilarChunk {
+    pub id: Uuid,
+    pub document_id: String,
+    pub chunk_index: i32,
+    pub content: String,
+    pub metadata: serde_json::Value,
+    pub content_hash: String,
+    pub token_count: i32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    /// Raw pgvector cosine distance (`embedding <=> query`), in `[0.0, 2.0]`.
+    pub cosine_distance: f64,
+    /// Cosine similarity (`1.0 - cosine_distance`), in `[-1.0, 1.0]`.
+    pub similarity: f64,
+}
+
 /// Summary returned by [`ChunkRepository::batch_insert_chunks`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchUpsertSummary {
@@ -102,6 +126,68 @@ pub fn format_pgvector(
     }
     out.push(']');
     Ok(out)
+}
+
+/// Compute cosine similarity between two equal-length vectors in pure Rust.
+///
+/// Returns `None` if lengths differ, either vector contains non-finite floats,
+/// or either vector has zero L2 norm.
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Option<f64> {
+    if a.len() != b.len() || a.is_empty() {
+        return None;
+    }
+
+    let mut dot = 0.0_f64;
+    let mut norm_a = 0.0_f64;
+    let mut norm_b = 0.0_f64;
+
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        if !x.is_finite() || !y.is_finite() {
+            return None;
+        }
+        let xf = f64::from(x);
+        let yf = f64::from(y);
+        dot += xf * yf;
+        norm_a += xf * xf;
+        norm_b += yf * yf;
+    }
+
+    let denom = (norm_a * norm_b).sqrt();
+    if denom <= f64::EPSILON {
+        return None;
+    }
+
+    Some((dot / denom).clamp(-1.0, 1.0))
+}
+
+fn validate_search_query(
+    query_vector: &[f32],
+    min_similarity: f32,
+) -> Result<(String, f64), ChunkRepoError> {
+    if !min_similarity.is_finite() || !(-1.0..=1.0).contains(&min_similarity) {
+        return Err(ChunkRepoError::InvalidQuery(format!(
+            "min_similarity must be finite and within [-1.0, 1.0], got {min_similarity}"
+        )));
+    }
+
+    let literal = format_pgvector(query_vector, EMBEDDING_DIMENSIONS, 0)?;
+
+    // pgvector's cosine distance `<=>` yields NaN for a zero-norm vector; reject upfront.
+    let norm_sq: f64 = query_vector
+        .iter()
+        .map(|&v| {
+            let f = f64::from(v);
+            f * f
+        })
+        .sum();
+    if norm_sq <= f64::EPSILON {
+        return Err(ChunkRepoError::InvalidQuery(
+            "query_vector cannot be the zero vector for cosine similarity search".to_string(),
+        ));
+    }
+
+    let max_distance = (1.0_f64 - f64::from(min_similarity)).clamp(0.0, 2.0);
+    Ok((literal, max_distance))
 }
 
 fn validate_chunk(index: usize, chunk: &NewDocumentChunk) -> Result<(), ChunkRepoError> {
@@ -167,7 +253,7 @@ fn deduplicate_chunks(chunks: &[NewDocumentChunk]) -> (Vec<&NewDocumentChunk>, u
     (unique, duplicates)
 }
 
-/// Repository for bulk-ingesting and managing vectorized `document_chunks` in PostgreSQL.
+/// Repository for bulk-ingesting and querying vectorized `document_chunks` in PostgreSQL.
 pub struct ChunkRepository;
 
 impl ChunkRepository {
@@ -300,6 +386,85 @@ impl ChunkRepository {
         })
     }
 
+    /// Perform Top-K cosine similarity search using pgvector's `<=>` operator and HNSW index.
+    ///
+    /// Returns chunks ordered from highest similarity (`1.0 - distance`) to lowest,
+    /// filtering out candidates below `min_similarity`.
+    pub async fn search_similar_chunks(
+        pool: &PgPool,
+        query_vector: &[f32],
+        limit: usize,
+        min_similarity: f32,
+    ) -> Result<Vec<SimilarChunk>, ChunkRepoError> {
+        Self::search_similar_chunks_filtered(pool, query_vector, limit, min_similarity, None).await
+    }
+
+    /// Perform Top-K cosine similarity search with an optional `document_id` scope filter.
+    pub async fn search_similar_chunks_filtered(
+        pool: &PgPool,
+        query_vector: &[f32],
+        limit: usize,
+        min_similarity: f32,
+        document_id: Option<&str>,
+    ) -> Result<Vec<SimilarChunk>, ChunkRepoError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let (query_literal, max_distance) = validate_search_query(query_vector, min_similarity)?;
+        let clamped_limit =
+            i64::try_from(limit.min(MAX_SEARCH_LIMIT)).unwrap_or(MAX_SEARCH_LIMIT as i64);
+        let doc_filter = document_id.map(str::trim).filter(|s| !s.is_empty());
+
+        // Ordering by `embedding <=> $1::vector(1536) ASC LIMIT $2` inside the CTE allows
+        // PostgreSQL to utilize `idx_document_chunks_embedding_hnsw` (vector_cosine_ops),
+        // then applies the similarity threshold cleanly on the candidate set.
+        let rows: Vec<SimilarChunk> = sqlx::query_as(
+            r#"
+            WITH nearest AS (
+                SELECT
+                    id,
+                    document_id,
+                    chunk_index,
+                    content,
+                    metadata,
+                    content_hash,
+                    token_count,
+                    created_at,
+                    updated_at,
+                    (embedding <=> $1::vector(1536))::float8 AS cosine_distance
+                FROM document_chunks
+                WHERE ($4::text IS NULL OR document_id = $4)
+                ORDER BY embedding <=> $1::vector(1536) ASC
+                LIMIT $2
+            )
+            SELECT
+                id,
+                document_id,
+                chunk_index,
+                content,
+                metadata,
+                content_hash,
+                token_count,
+                created_at,
+                updated_at,
+                cosine_distance,
+                (1.0::float8 - cosine_distance) AS similarity
+            FROM nearest
+            WHERE cosine_distance <= $3::float8
+            ORDER BY cosine_distance ASC, id ASC
+            "#,
+        )
+        .bind(&query_literal)
+        .bind(clamped_limit)
+        .bind(max_distance)
+        .bind(doc_filter)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(rows)
+    }
+
     /// List all stored chunks belonging to a single document, ordered by `chunk_index`.
     pub async fn list_chunks_by_document(
         pool: &PgPool,
@@ -347,10 +512,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn sample_embedding(seed: f32) -> Vec<f32> {
+    fn sample_embedding(x: f32, y: f32) -> Vec<f32> {
         let mut vec = vec![0.0_f32; EMBEDDING_DIMENSIONS];
-        vec[0] = seed;
-        vec[1] = 1.0 - seed;
+        vec[0] = x;
+        vec[1] = y;
         vec
     }
 
@@ -362,7 +527,7 @@ mod tests {
             metadata: json!({ "source": doc, "chunk_index": idx }),
             content_hash: hash.to_string(),
             token_count: 42,
-            embedding: sample_embedding(0.5),
+            embedding: sample_embedding(0.5, 0.5),
         }
     }
 
@@ -391,6 +556,40 @@ mod tests {
         assert!(matches!(
             inf_err,
             ChunkRepoError::NonFiniteEmbedding { index: 0 }
+        ));
+    }
+
+    #[test]
+    fn cosine_similarity_and_search_query_validation() {
+        let a = sample_embedding(1.0, 0.0);
+        let b = sample_embedding(0.8, 0.6);
+        let c = sample_embedding(0.0, 1.0);
+        let d = sample_embedding(-1.0, 0.0);
+
+        assert!((cosine_similarity(&a, &a).unwrap() - 1.0).abs() < 1e-6);
+        assert!((cosine_similarity(&a, &b).unwrap() - 0.8).abs() < 1e-6);
+        assert!(cosine_similarity(&a, &c).unwrap().abs() < 1e-6);
+        assert!((cosine_similarity(&a, &d).unwrap() + 1.0).abs() < 1e-6);
+        assert!(cosine_similarity(&[0.0; 4], &[1.0, 0.0, 0.0, 0.0]).is_none());
+
+        let (_, max_dist) = validate_search_query(&a, 0.75).unwrap();
+        assert!((max_dist - 0.25).abs() < 1e-6);
+
+        // Zero vector must be rejected before pgvector produces NaN cosine distance.
+        let zero = vec![0.0_f32; EMBEDDING_DIMENSIONS];
+        assert!(matches!(
+            validate_search_query(&zero, 0.5),
+            Err(ChunkRepoError::InvalidQuery(_))
+        ));
+
+        // Out-of-range or NaN similarity threshold must be rejected.
+        assert!(matches!(
+            validate_search_query(&a, 1.5),
+            Err(ChunkRepoError::InvalidQuery(_))
+        ));
+        assert!(matches!(
+            validate_search_query(&a, f32::NAN),
+            Err(ChunkRepoError::InvalidQuery(_))
         ));
     }
 
@@ -442,7 +641,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn batch_insert_chunks_short_circuits_empty_and_invalid_inputs_before_db() {
+    async fn batch_insert_and_search_short_circuit_invalid_inputs_before_db() {
         let lazy_pool = crate::connect_lazy("postgres://user:pass@127.0.0.1:5432/nonexistent")
             .expect("lazy pool creation should not connect");
 
@@ -466,6 +665,20 @@ mod tests {
                 actual: 768
             }
         ));
+
+        // limit = 0 short-circuits cleanly.
+        let zero_limit =
+            ChunkRepository::search_similar_chunks(&lazy_pool, &sample_embedding(1.0, 0.0), 0, 0.5)
+                .await
+                .unwrap();
+        assert!(zero_limit.is_empty());
+
+        // Zero-norm query vector fails before touching PostgreSQL.
+        let zero_vec = vec![0.0_f32; EMBEDDING_DIMENSIONS];
+        let search_err = ChunkRepository::search_similar_chunks(&lazy_pool, &zero_vec, 5, 0.5)
+            .await
+            .expect_err("zero query vector must fail before DB");
+        assert!(matches!(search_err, ChunkRepoError::InvalidQuery(_)));
     }
 
     #[sqlx::test(migrations = "../../migrations")]
@@ -496,7 +709,7 @@ mod tests {
         let mut updated = sample_chunk("docs/rag.md", 2, "blake3-aaa", "refreshed chunk 0");
         updated.metadata = json!({ "source": "docs/rag.md", "updated": true });
         updated.token_count = 99;
-        updated.embedding = sample_embedding(0.9);
+        updated.embedding = sample_embedding(0.9, 0.1);
 
         let second = ChunkRepository::batch_insert_chunks(&pool, &[updated])
             .await
@@ -512,5 +725,53 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(deleted, 2);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn search_similar_chunks_ranks_by_cosine_similarity_and_applies_threshold(pool: PgPool) {
+        let mut exact = sample_chunk("doc-a", 0, "h-exact", "exact match");
+        exact.embedding = sample_embedding(1.0, 0.0);
+
+        let mut close = sample_chunk("doc-b", 0, "h-close", "close match");
+        close.embedding = sample_embedding(0.8, 0.6);
+
+        let mut orthogonal = sample_chunk("doc-a", 1, "h-ortho", "orthogonal match");
+        orthogonal.embedding = sample_embedding(0.0, 1.0);
+
+        let mut opposite = sample_chunk("doc-b", 1, "h-opposite", "opposite match");
+        opposite.embedding = sample_embedding(-1.0, 0.0);
+
+        ChunkRepository::batch_insert_chunks(&pool, &[exact, close, orthogonal, opposite])
+            .await
+            .unwrap();
+
+        let query = sample_embedding(1.0, 0.0);
+
+        // Threshold 0.5 should return exact (~1.0) then close (~0.8) only.
+        let hits = ChunkRepository::search_similar_chunks(&pool, &query, 10, 0.5)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].content, "exact match");
+        assert!((hits[0].similarity - 1.0).abs() < 1e-5);
+        assert!(hits[0].cosine_distance.abs() < 1e-5);
+        assert_eq!(hits[1].content, "close match");
+        assert!((hits[1].similarity - 0.8).abs() < 1e-5);
+
+        // Top-1 limit returns only exact match.
+        let top1 = ChunkRepository::search_similar_chunks(&pool, &query, 1, 0.0)
+            .await
+            .unwrap();
+        assert_eq!(top1.len(), 1);
+        assert_eq!(top1[0].content, "exact match");
+
+        // Document scope filter returns only doc-b's matching chunk.
+        let scoped =
+            ChunkRepository::search_similar_chunks_filtered(&pool, &query, 10, 0.5, Some("doc-b"))
+                .await
+                .unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].document_id, "doc-b");
+        assert_eq!(scoped[0].content, "close match");
     }
 }
