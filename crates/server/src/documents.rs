@@ -1,7 +1,8 @@
 use std::time::Instant;
 
 use ai_parser::{
-    DiffCalculator, DocumentFingerprint, ParseError, ParsedDocument, RepositoryScanner,
+    DiffCalculator, DocumentChunk, DocumentChunker, DocumentChunkerConfig, DocumentFingerprint,
+    ParseError, ParsedDocument, RepositoryScanner, TokenizerEncoding, hash_text,
 };
 use axum::Json;
 use rayon::prelude::*;
@@ -11,6 +12,8 @@ use crate::error::{AppError, AppResult};
 
 const MAX_DOCUMENT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_BATCH_FILES: usize = 100;
+const MIN_CHUNK_SIZE_TOKENS: usize = 32;
+const MAX_CHUNK_SIZE_TOKENS: usize = 4096;
 
 #[derive(Debug, Deserialize)]
 pub struct ParseDocumentRequest {
@@ -48,6 +51,47 @@ pub struct ParseBatchResponse {
     pub failed: Vec<ParseBatchFailure>,
     pub total_bytes: usize,
     pub elapsed_ms: f64,
+}
+
+fn default_max_tokens() -> usize {
+    256
+}
+
+fn default_overlap_tokens() -> usize {
+    32
+}
+
+fn default_min_chunk_tokens() -> usize {
+    32
+}
+
+fn default_include_headers() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChunkDocumentRequest {
+    pub filename: String,
+    pub content: String,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: usize,
+    #[serde(default = "default_overlap_tokens")]
+    pub overlap_tokens: usize,
+    #[serde(default = "default_min_chunk_tokens")]
+    pub min_chunk_tokens: usize,
+    #[serde(default)]
+    pub encoding: TokenizerEncoding,
+    #[serde(default = "default_include_headers")]
+    pub include_context_headers: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChunkDocumentResponse {
+    pub chunks: Vec<DocumentChunk>,
+    pub total_chunks: usize,
+    pub total_tokens: usize,
+    pub avg_tokens: f64,
+    pub chunk_time_ms: f64,
 }
 
 fn map_parse_error(err: ParseError) -> AppError {
@@ -174,6 +218,71 @@ pub async fn parse_documents_batch(
     Ok(Json(response))
 }
 
+/// POST /api/documents/chunk - Run semantic/AST-aware chunking with live tunable parameters.
+pub async fn chunk_document(
+    Json(payload): Json<ChunkDocumentRequest>,
+) -> AppResult<Json<ChunkDocumentResponse>> {
+    let filename = payload.filename.trim().to_string();
+    if filename.is_empty() {
+        return Err(AppError::BadRequest("filename cannot be empty".to_string()));
+    }
+    if payload.content.is_empty() {
+        return Err(AppError::BadRequest("content cannot be empty".to_string()));
+    }
+    if payload.content.len() > MAX_DOCUMENT_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "content exceeds maximum size of {} bytes",
+            MAX_DOCUMENT_BYTES
+        )));
+    }
+    if payload.max_tokens < MIN_CHUNK_SIZE_TOKENS || payload.max_tokens > MAX_CHUNK_SIZE_TOKENS {
+        return Err(AppError::BadRequest(format!(
+            "max_tokens must be between {MIN_CHUNK_SIZE_TOKENS} and {MAX_CHUNK_SIZE_TOKENS}"
+        )));
+    }
+    if payload.overlap_tokens >= payload.max_tokens {
+        return Err(AppError::BadRequest(
+            "overlap_tokens must be strictly less than max_tokens".to_string(),
+        ));
+    }
+
+    let config = DocumentChunkerConfig {
+        max_tokens: payload.max_tokens,
+        overlap_tokens: payload.overlap_tokens,
+        min_chunk_tokens: payload.min_chunk_tokens,
+        encoding: payload.encoding,
+        include_context_headers: payload.include_context_headers,
+    };
+    let content = payload.content;
+
+    let response = tokio::task::spawn_blocking(move || {
+        let start = Instant::now();
+        let file_id = hash_text(&filename)[..24].to_string();
+        let chunker = DocumentChunker::new(config);
+        let chunks = chunker.chunk_file(&file_id, &filename, &content)?;
+        let total_chunks = chunks.len();
+        let total_tokens: usize = chunks.iter().map(|c| c.token_count).sum();
+        let avg_tokens = if total_chunks == 0 {
+            0.0
+        } else {
+            total_tokens as f64 / total_chunks as f64
+        };
+        let chunk_time_ms = start.elapsed().as_secs_f64() * 1000.0;
+        Ok::<_, ParseError>(ChunkDocumentResponse {
+            chunks,
+            total_chunks,
+            total_tokens,
+            avg_tokens,
+            chunk_time_ms,
+        })
+    })
+    .await
+    .map_err(|err| AppError::Internal(err.into()))?
+    .map_err(map_parse_error)?;
+
+    Ok(Json(response))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,5 +405,57 @@ mod tests {
         assert_eq!(batch.parsed.len(), 2);
         assert_eq!(batch.failed.len(), 1);
         assert_eq!(batch.failed[0].filename, "photo.png");
+    }
+
+    #[tokio::test]
+    async fn test_chunk_document_endpoint_and_validation() {
+        let app = test_router();
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/documents/chunk")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "filename": "docs/rag.md",
+                    "content": "# RAG Engine\n\n## Chunking\nSemantic chunker splits cleanly by headings.\n\n## Retrieval\nHybrid search fuses dense vectors with BM25.",
+                    "max_tokens": 96,
+                    "overlap_tokens": 16,
+                    "min_chunk_tokens": 12,
+                    "encoding": "o200k_base",
+                    "include_context_headers": true
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let res: ChunkDocumentResponse = serde_json::from_slice(&body).unwrap();
+        assert!(res.total_chunks >= 2);
+        assert_eq!(res.chunks.len(), res.total_chunks);
+        assert!(res.total_tokens > 0);
+        for chunk in &res.chunks {
+            assert!(chunk.token_count <= 96);
+        }
+
+        // Invalid overlap >= max_tokens returns 400
+        let bad_req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/documents/chunk")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "filename": "docs/rag.md",
+                    "content": "# Test\nBody",
+                    "max_tokens": 64,
+                    "overlap_tokens": 64
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let bad_resp = app.oneshot(bad_req).await.unwrap();
+        assert_eq!(bad_resp.status(), StatusCode::BAD_REQUEST);
     }
 }

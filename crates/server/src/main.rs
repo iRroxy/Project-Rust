@@ -195,6 +195,7 @@ pub fn build_app(state: AppState) -> Router {
             post(conversations::chat_stream),
         )
         .route("/api/documents/parse", post(documents::parse_document))
+        .route("/api/documents/chunk", post(documents::chunk_document))
         .route(
             "/api/documents/parse-batch",
             post(documents::parse_documents_batch).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),

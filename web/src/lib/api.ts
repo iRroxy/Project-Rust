@@ -1,4 +1,6 @@
 import type {
+  ChunkDocumentRequest,
+  ChunkDocumentResponse,
   Conversation,
   Message,
   ModelsInfo,
@@ -75,6 +77,12 @@ export const api = {
     request<ParseBatchResponse>("/api/documents/parse-batch", {
       method: "POST",
       body: JSON.stringify({ files }),
+    }),
+
+  chunkDocument: (payload: ChunkDocumentRequest) =>
+    request<ChunkDocumentResponse>("/api/documents/chunk", {
+      method: "POST",
+      body: JSON.stringify(payload),
     }),
 };
 

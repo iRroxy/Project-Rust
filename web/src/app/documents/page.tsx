@@ -16,12 +16,14 @@ import {
   Braces,
   Hash,
   Layers,
+  Scissors,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
+import { ChunkInspector } from "@/components/ChunkInspector";
 import { api } from "@/lib/api";
 import type {
   CodeSymbol,
@@ -32,14 +34,19 @@ import type {
 
 interface ParsedEntry {
   id: string;
+  rawContent: string;
   document: ParsedDocument;
   fingerprint: DocumentFingerprint;
   parseTimeMs: number;
 }
 
+type InspectorTab = "outline" | "chunks";
+
 const SAMPLE_RUST = {
   filename: "crates/engine/src/retriever.rs",
-  content: `/// Configuration for hybrid vector + BM25 search.
+  content: `use std::collections::HashMap;
+
+/// Configuration for hybrid vector + BM25 search.
 #[derive(Debug, Clone)]
 pub struct SearchConfig {
     pub top_k: usize,
@@ -62,6 +69,20 @@ impl Retriever for SearchConfig {
 pub fn rrf_score(rank: usize, k: f32) -> f32 {
     1.0 / (k + rank as f32)
 }
+
+/// Merge vector hits and BM25 keyword hits using RRF weights.
+pub fn merge_ranked_lists(vector_ids: &[String], bm25_ids: &[String], k: f32) -> Vec<(String, f32)> {
+    let mut scores: HashMap<String, f32> = HashMap::new();
+    for (idx, id) in vector_ids.iter().enumerate() {
+        *scores.entry(id.clone()).or_insert(0.0) += rrf_score(idx + 1, k);
+    }
+    for (idx, id) in bm25_ids.iter().enumerate() {
+        *scores.entry(id.clone()).or_insert(0.0) += rrf_score(idx + 1, k);
+    }
+    let mut ranked: Vec<(String, f32)> = scores.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+    ranked
+}
 `,
 };
 
@@ -69,21 +90,27 @@ const SAMPLE_MARKDOWN = {
   filename: "docs/rag_architecture.md",
   content: `# Rust Hybrid RAG Engine
 
-A low-memory, high-throughput retrieval pipeline written in pure Rust.
+A low-memory, high-throughput retrieval pipeline written in pure Rust for developer knowledge bases.
 
 ## 1. Ingestion Pipeline
-Files are discovered with \`ignore\` and parsed in parallel via \`rayon\`.
+Files are discovered with \`ignore\` (respecting \`.gitignore\`) and parsed in parallel via \`rayon\`, keeping peak working set below 15 MB.
 
 ### 1.1 AST Symbol Extraction
-Source files (.rs, .ts, .tsx, .py) are parsed with \`tree-sitter\` so functions are never split mid-body.
+Source files (.rs, .ts, .tsx, .py) are parsed with \`tree-sitter\` so functions and structs are never split mid-body.
 
 \`\`\`rust
 let report = RepositoryScanner::scan_directory("./crates")?;
 println!("Parsed {} files in {}ms", report.documents.len(), report.elapsed_ms);
 \`\`\`
 
+### 1.2 Bounded Backpressure Streaming
+Large repositories stream chunks through a bounded \`tokio::sync::mpsc::channel(128)\` so memory stays O(1) regardless of total corpus size.
+
 ## 2. Incremental Indexing
-Every document and structural unit is hashed with \`blake3\` to skip unchanged embeddings.
+Every document and structural unit is hashed with \`blake3\` to skip unchanged embeddings and garbage-collect stale chunks automatically.
+
+## 3. Hybrid Search & RRF Reranking
+Dense cosine similarity from \`pgvector\` HNSW is executed concurrently with PostgreSQL \`tsvector\` BM25 keyword recall using \`tokio::join!\`, then fused with Reciprocal Rank Fusion.
 `,
 };
 
@@ -108,6 +135,7 @@ function formatBytes(bytes: number): string {
 export default function DocumentsPage() {
   const [entries, setEntries] = useState<ParsedEntry[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<InspectorTab>("chunks");
   const [expandedSymbol, setExpandedSymbol] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isParsing, setIsParsing] = useState(false);
@@ -127,6 +155,7 @@ export default function DocumentsPage() {
         const res = await api.parseDocument(files[0].filename, files[0].content);
         const newEntry: ParsedEntry = {
           id: `${res.document.path}-${Date.now()}`,
+          rawContent: files[0].content,
           document: res.document,
           fingerprint: res.fingerprint,
           parseTimeMs: res.parse_time_ms,
@@ -136,10 +165,12 @@ export default function DocumentsPage() {
         setBatchStats({ count: 1, elapsedMs: res.parse_time_ms });
       } else {
         const res = await api.parseDocumentsBatch(files);
+        const contentMap = new Map(files.map((f) => [f.filename.replace(/\\/g, "/"), f.content]));
         const now = Date.now();
         const perFileAvg = res.parsed.length > 0 ? res.elapsed_ms / res.parsed.length : 0;
         const newEntries: ParsedEntry[] = res.parsed.map((item, idx) => ({
           id: `${item.document.path}-${now}-${idx}`,
+          rawContent: contentMap.get(item.document.path) ?? "",
           document: item.document,
           fingerprint: item.fingerprint,
           parseTimeMs: perFileAvg,
@@ -204,10 +235,10 @@ export default function DocumentsPage() {
           <Separator orientation="vertical" className="h-5" />
           <div className="flex items-center gap-2">
             <Braces className="h-4 w-4 text-primary" />
-            <h1 className="text-sm font-semibold">文档与代码 AST 解析工作台</h1>
+            <h1 className="text-sm font-semibold">文档解析与切块探针工作台</h1>
           </div>
           <Badge variant="secondary" className="hidden font-mono text-[10px] sm:inline-flex">
-            pulldown-cmark + tree-sitter + Blake3
+            tree-sitter + BPE + SemanticChunker
           </Badge>
         </div>
 
@@ -309,7 +340,7 @@ export default function DocumentsPage() {
           <ScrollArea className="flex-1 px-2 pb-3">
             {entries.length === 0 ? (
               <div className="px-3 py-8 text-center text-xs text-muted-foreground">
-                暂无解析记录。上传本地代码/文档，或点击右上角加载示例体验 Rust 极速 AST 提取。
+                暂无解析记录。上传本地代码/文档，或点击右上角加载示例体验 Rust 极速 AST 提取与实时切块探针。
               </div>
             ) : (
               <div className="space-y-1.5">
@@ -364,7 +395,7 @@ export default function DocumentsPage() {
           </ScrollArea>
         </aside>
 
-        {/* Right Column: Structured AST / Markdown Inspector */}
+        {/* Right Column: Structured AST / Markdown & Interactive Chunk Inspector */}
         <main className="flex-1 overflow-hidden">
           {!selectedEntry ? (
             <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center text-muted-foreground">
@@ -373,8 +404,8 @@ export default function DocumentsPage() {
                 <p className="text-sm font-medium text-foreground">等待文档输入</p>
                 <p className="max-w-md text-xs">
                   Rust 后端将使用 <code className="font-mono">pulldown-cmark</code> 解析 Markdown
-                  标题层级，使用 <code className="font-mono">tree-sitter</code> 提取代码 AST 符号与
-                  Docstring，并计算 <code className="font-mono">Blake3</code> 增量指纹。
+                  标题层级，使用 <code className="font-mono">tree-sitter</code> 提取代码 AST
+                  符号，并通过 <code className="font-mono">tiktoken-rs</code> 实时调优 BPE 语义切块。
                 </p>
               </div>
             </div>
@@ -397,7 +428,7 @@ export default function DocumentsPage() {
                       </div>
                       <div className="flex flex-wrap items-center gap-3 font-mono text-[11px] text-muted-foreground tabular-nums">
                         <span>大小: {formatBytes(selectedEntry.document.size_bytes)}</span>
-                        <span>耗时: {selectedEntry.parseTimeMs.toFixed(2)} ms</span>
+                        <span>解析耗时: {selectedEntry.parseTimeMs.toFixed(2)} ms</span>
                         <span>结构单元: {selectedEntry.fingerprint.unit_hashes.length}</span>
                       </div>
                     </div>
@@ -412,157 +443,191 @@ export default function DocumentsPage() {
                   </div>
                 </Card>
 
-                {/* Content-Type Specific Visualization */}
-                {selectedEntry.document.content.kind === "code" && (
-                  <section className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                        <FileCode2 className="h-3.5 w-3.5" />
-                        <span>
-                          AST 符号树 ({selectedEntry.document.content.symbols.length} 个符号 ·{" "}
-                          {selectedEntry.document.content.total_lines} 行)
-                        </span>
-                      </h3>
-                    </div>
+                {/* View Mode Switcher */}
+                <div className="flex items-center gap-2 border-b pb-3">
+                  <Button
+                    size="sm"
+                    variant={activeTab === "chunks" ? "default" : "outline"}
+                    className="h-8 gap-1.5 text-xs"
+                    onClick={() => setActiveTab("chunks")}
+                  >
+                    <Scissors className="h-3.5 w-3.5" />
+                    <span>切块探针 (Chunk Inspector)</span>
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant={activeTab === "outline" ? "default" : "outline"}
+                    className="h-8 gap-1.5 text-xs"
+                    onClick={() => setActiveTab("outline")}
+                  >
+                    <Braces className="h-3.5 w-3.5" />
+                    <span>AST 符号树与 Blake3 指纹</span>
+                  </Button>
+                </div>
 
-                    <div className="space-y-2">
-                      {selectedEntry.document.content.symbols.map((sym: CodeSymbol, idx: number) => {
-                        const symKey = `${sym.kind}-${sym.name}-${sym.start_line}-${idx}`;
-                        const isOpen = expandedSymbol === symKey;
-                        return (
-                          <Card key={symKey} className="overflow-hidden">
-                            <button
-                              type="button"
-                              onClick={() => setExpandedSymbol(isOpen ? null : symKey)}
-                              className="flex w-full items-start justify-between gap-3 p-3 text-left transition-colors hover:bg-muted/40"
-                            >
-                              <div className="min-w-0 flex-1 space-y-1">
-                                <div className="flex flex-wrap items-center gap-2">
-                                  {isOpen ? (
-                                    <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                                  ) : (
-                                    <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                                  )}
-                                  <Badge
-                                    variant="outline"
-                                    className={`font-mono text-[10px] ${SYMBOL_STYLES[sym.kind]}`}
+                {activeTab === "chunks" ? (
+                  <ChunkInspector
+                    filename={selectedEntry.document.path}
+                    content={selectedEntry.rawContent}
+                  />
+                ) : (
+                  <div className="space-y-5">
+                    {/* Content-Type Specific Visualization */}
+                    {selectedEntry.document.content.kind === "code" && (
+                      <section className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                            <FileCode2 className="h-3.5 w-3.5" />
+                            <span>
+                              AST 符号树 ({selectedEntry.document.content.symbols.length} 个符号 ·{" "}
+                              {selectedEntry.document.content.total_lines} 行)
+                            </span>
+                          </h3>
+                        </div>
+
+                        <div className="space-y-2">
+                          {selectedEntry.document.content.symbols.map(
+                            (sym: CodeSymbol, idx: number) => {
+                              const symKey = `${sym.kind}-${sym.name}-${sym.start_line}-${idx}`;
+                              const isOpen = expandedSymbol === symKey;
+                              return (
+                                <Card key={symKey} className="overflow-hidden">
+                                  <button
+                                    type="button"
+                                    onClick={() => setExpandedSymbol(isOpen ? null : symKey)}
+                                    className="flex w-full items-start justify-between gap-3 p-3 text-left transition-colors hover:bg-muted/40"
                                   >
-                                    {sym.kind}
+                                    <div className="min-w-0 flex-1 space-y-1">
+                                      <div className="flex flex-wrap items-center gap-2">
+                                        {isOpen ? (
+                                          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                                        ) : (
+                                          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                                        )}
+                                        <Badge
+                                          variant="outline"
+                                          className={`font-mono text-[10px] ${SYMBOL_STYLES[sym.kind]}`}
+                                        >
+                                          {sym.kind}
+                                        </Badge>
+                                        <span className="font-mono text-xs font-semibold">
+                                          {sym.name}
+                                        </span>
+                                      </div>
+                                      {sym.docstring && (
+                                        <p className="pl-5 text-xs text-muted-foreground">
+                                          {sym.docstring}
+                                        </p>
+                                      )}
+                                      <p className="truncate pl-5 font-mono text-[11px] text-muted-foreground/80">
+                                        {sym.signature}
+                                      </p>
+                                    </div>
+                                    <Badge
+                                      variant="outline"
+                                      className="shrink-0 font-mono text-[10px] tabular-nums"
+                                    >
+                                      L{sym.start_line}–L{sym.end_line}
+                                    </Badge>
+                                  </button>
+
+                                  {isOpen && (
+                                    <div className="border-t bg-muted/30 p-3">
+                                      <pre className="overflow-x-auto font-mono text-xs leading-relaxed">
+                                        <code>{sym.source}</code>
+                                      </pre>
+                                    </div>
+                                  )}
+                                </Card>
+                              );
+                            }
+                          )}
+                        </div>
+                      </section>
+                    )}
+
+                    {selectedEntry.document.content.kind === "markdown" && (
+                      <section className="space-y-3">
+                        <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                          <Hash className="h-3.5 w-3.5" />
+                          <span>
+                            Markdown 结构化目录 ({selectedEntry.document.content.sections.length}{" "}
+                            个章节)
+                          </span>
+                        </h3>
+
+                        <div className="space-y-2.5">
+                          {selectedEntry.document.content.sections.map((section, idx) => (
+                            <Card
+                              key={`${section.title}-${idx}`}
+                              className="p-4"
+                              style={{
+                                marginLeft: `${Math.max(0, section.level - 1) * 16}px`,
+                              }}
+                            >
+                              <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                                <div className="flex items-center gap-2">
+                                  <Badge variant="outline" className="font-mono text-[10px]">
+                                    {section.level > 0 ? `H${section.level}` : "PREAMBLE"}
                                   </Badge>
-                                  <span className="font-mono text-xs font-semibold">
-                                    {sym.name}
+                                  <span className="text-sm font-semibold">
+                                    {section.title || "(无标题前置段落)"}
                                   </span>
                                 </div>
-                                {sym.docstring && (
-                                  <p className="pl-5 text-xs text-muted-foreground">
-                                    {sym.docstring}
-                                  </p>
+                                {section.code_blocks.length > 0 && (
+                                  <Badge variant="secondary" className="font-mono text-[10px]">
+                                    {section.code_blocks.length} 代码块
+                                  </Badge>
                                 )}
-                                <p className="truncate pl-5 font-mono text-[11px] text-muted-foreground/80">
-                                  {sym.signature}
+                              </div>
+
+                              {section.breadcrumbs.length > 0 && (
+                                <p className="mb-2 font-mono text-[10px] text-muted-foreground">
+                                  {section.breadcrumbs.join(" > ")}
                                 </p>
-                              </div>
-                              <Badge
-                                variant="outline"
-                                className="shrink-0 font-mono text-[10px] tabular-nums"
-                              >
-                                L{sym.start_line}–L{sym.end_line}
-                              </Badge>
-                            </button>
+                              )}
 
-                            {isOpen && (
-                              <div className="border-t bg-muted/30 p-3">
-                                <pre className="overflow-x-auto font-mono text-xs leading-relaxed">
-                                  <code>{sym.source}</code>
-                                </pre>
-                              </div>
-                            )}
-                          </Card>
-                        );
-                      })}
-                    </div>
-                  </section>
-                )}
+                              {section.content && (
+                                <p className="whitespace-pre-wrap text-xs leading-relaxed text-foreground/90">
+                                  {section.content}
+                                </p>
+                              )}
+                            </Card>
+                          ))}
+                        </div>
+                      </section>
+                    )}
 
-                {selectedEntry.document.content.kind === "markdown" && (
-                  <section className="space-y-3">
-                    <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                      <Hash className="h-3.5 w-3.5" />
-                      <span>
-                        Markdown 结构化目录 ({selectedEntry.document.content.sections.length} 个章节)
-                      </span>
-                    </h3>
+                    {selectedEntry.document.content.kind === "plain_text" && (
+                      <Card className="p-4">
+                        <pre className="whitespace-pre-wrap font-mono text-xs leading-relaxed">
+                          {selectedEntry.document.content.content}
+                        </pre>
+                      </Card>
+                    )}
 
-                    <div className="space-y-2.5">
-                      {selectedEntry.document.content.sections.map((section, idx) => (
-                        <Card
-                          key={`${section.title}-${idx}`}
-                          className="p-4"
-                          style={{
-                            marginLeft: `${Math.max(0, section.level - 1) * 16}px`,
-                          }}
-                        >
-                          <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
-                            <div className="flex items-center gap-2">
-                              <Badge variant="outline" className="font-mono text-[10px]">
-                                {section.level > 0 ? `H${section.level}` : "PREAMBLE"}
-                              </Badge>
-                              <span className="text-sm font-semibold">
-                                {section.title || "(无标题前置段落)"}
-                              </span>
-                            </div>
-                            {section.code_blocks.length > 0 && (
-                              <Badge variant="secondary" className="font-mono text-[10px]">
-                                {section.code_blocks.length} 代码块
-                              </Badge>
-                            )}
+                    {/* Blake3 Unit Fingerprints */}
+                    <section className="space-y-2">
+                      <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                        <Fingerprint className="h-3.5 w-3.5" />
+                        <span>Blake3 单元级增量指纹 (用于零冗余 RAG 增量索引)</span>
+                      </h3>
+                      <Card className="divide-y">
+                        {selectedEntry.fingerprint.unit_hashes.map((u, idx) => (
+                          <div
+                            key={`${u.unit_key}-${idx}`}
+                            className="flex items-center justify-between gap-4 px-3.5 py-2 font-mono text-[11px]"
+                          >
+                            <span className="truncate text-foreground">{u.unit_key}</span>
+                            <span className="shrink-0 text-muted-foreground">
+                              {u.hash.slice(0, 20)}…
+                            </span>
                           </div>
-
-                          {section.breadcrumbs.length > 0 && (
-                            <p className="mb-2 font-mono text-[10px] text-muted-foreground">
-                              {section.breadcrumbs.join(" > ")}
-                            </p>
-                          )}
-
-                          {section.content && (
-                            <p className="whitespace-pre-wrap text-xs leading-relaxed text-foreground/90">
-                              {section.content}
-                            </p>
-                          )}
-                        </Card>
-                      ))}
-                    </div>
-                  </section>
+                        ))}
+                      </Card>
+                    </section>
+                  </div>
                 )}
-
-                {selectedEntry.document.content.kind === "plain_text" && (
-                  <Card className="p-4">
-                    <pre className="whitespace-pre-wrap font-mono text-xs leading-relaxed">
-                      {selectedEntry.document.content.content}
-                    </pre>
-                  </Card>
-                )}
-
-                {/* Blake3 Unit Fingerprints */}
-                <section className="space-y-2">
-                  <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                    <Fingerprint className="h-3.5 w-3.5" />
-                    <span>Blake3 单元级增量指纹 (用于零冗余 RAG 增量索引)</span>
-                  </h3>
-                  <Card className="divide-y">
-                    {selectedEntry.fingerprint.unit_hashes.map((u, idx) => (
-                      <div
-                        key={`${u.unit_key}-${idx}`}
-                        className="flex items-center justify-between gap-4 px-3.5 py-2 font-mono text-[11px]"
-                      >
-                        <span className="truncate text-foreground">{u.unit_key}</span>
-                        <span className="shrink-0 text-muted-foreground">
-                          {u.hash.slice(0, 20)}…
-                        </span>
-                      </div>
-                    ))}
-                  </Card>
-                </section>
               </div>
             </ScrollArea>
           )}

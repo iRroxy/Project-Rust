@@ -142,3 +142,63 @@ export interface ParseBatchResponse {
   total_bytes: number;
   elapsed_ms: number;
 }
+
+// --- Month 2 (Week 6): Semantic & AST Chunker Types ---
+
+export type TokenizerEncoding = "cl100k_base" | "o200k_base";
+
+export type ChunkKind = "markdown" | "code" | "plain_text";
+
+export interface ByteRange {
+  start: number;
+  end: number;
+}
+
+export interface LineRange {
+  start: number;
+  end: number;
+}
+
+export interface ChunkMetadata {
+  file_path: string;
+  kind: ChunkKind;
+  language: SupportedLanguage | null;
+  module_path: string | null;
+  breadcrumbs: string[];
+  heading_level: number | null;
+  symbol_name: string | null;
+  parent_symbol: string | null;
+  symbol_kind: SymbolKind | null;
+  byte_range: ByteRange;
+  line_range: LineRange | null;
+  encoding: TokenizerEncoding;
+}
+
+export interface DocumentChunk {
+  chunk_id: string;
+  file_id: string;
+  chunk_index: number;
+  content: string;
+  raw_content: string;
+  token_count: number;
+  content_hash: string;
+  metadata: ChunkMetadata;
+}
+
+export interface ChunkDocumentRequest {
+  filename: string;
+  content: string;
+  max_tokens?: number;
+  overlap_tokens?: number;
+  min_chunk_tokens?: number;
+  encoding?: TokenizerEncoding;
+  include_context_headers?: boolean;
+}
+
+export interface ChunkDocumentResponse {
+  chunks: DocumentChunk[];
+  total_chunks: number;
+  total_tokens: number;
+  avg_tokens: number;
+  chunk_time_ms: number;
+}

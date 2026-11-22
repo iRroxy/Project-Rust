@@ -109,7 +109,7 @@
     2. 生产者流式解析并产出 Chunks，消费者批量接收，内存占用与文件体积解耦。
   - **验收 Commit**：`git commit -m "feat(parser): build asynchronous bounded chunking pipeline with mpsc"`
 
-- [ ] **Day 43：前端 Next.js 构建“切块探针 (Chunk Inspector)”调试视图**
+- [x] **Day 43：前端 Next.js 构建“切块探针 (Chunk Inspector)”调试视图**
   - **10 min 速览**：设计可视化切块高亮组件，直观查看切分效果。
   - **30 min 实战**：
     1. 前端增加“分块预览”卡片，展示每个 Chunk 的 Token 占用、标题面包屑与正文。
