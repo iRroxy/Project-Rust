@@ -80,7 +80,7 @@
     3. 编写针对多语言混合（中英符号）文本的 Token 计数测试。
   - **验收 Commit**：`git commit -m "feat(parser): integrate tokenizers for precise BPE token counting"`
 
-- [ ] **Day 39：编写基于层级标题边界的 Markdown 语义切块器 (`SemanticChunker`)**
+- [x] **Day 39：编写基于层级标题边界的 Markdown 语义切块器 (`SemanticChunker`)**
   - **10 min 速览**：阅读 RAG 切块最佳实践：基于标题面包屑（Breadcrumbs）保留父级上下文。
   - **30 min 实战**：
     1. 实现 `SemanticChunker`：以 Markdown H1-H6 为逻辑段落边界，在设定的目标 Token 窗口（如 512 tokens）与重叠度（如 64 tokens）内智能合并。
