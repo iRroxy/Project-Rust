@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 serde.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
 reqwest.workspace = true
 tracing.workspace = true
 serde_json.workspace = true
@@ -19,5 +20,3 @@ jsonschema.workspace = true
 tokio.workspace = true
 dotenvy.workspace = true
 axum.workspace = true
-
-

@@ -1,7 +1,12 @@
+pub mod embedding;
 pub mod llm;
 pub mod provider;
 pub mod report;
 
+pub use embedding::{
+    EmbeddingError, EmbeddingProvider, MockEmbeddingProvider, OllamaEmbeddingProvider,
+    OpenAiEmbeddingProvider,
+};
 pub use llm::LlmClient;
 pub use provider::{
     ModelProvider, ModelProviderExt, ModelRouter, ModelSelection, ModelSelectionError, ModelTier,

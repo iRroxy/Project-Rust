@@ -136,7 +136,7 @@
     3. 创建 `document_chunks` 表，包含 `id`, `document_id`, `content`, `metadata`, `embedding vector(1536)` 及 HNSW 索引。
   - **验收 Commit**：`git commit -m "feat(db): add pgvector extension and document_chunks table migration"`
 
-- [ ] **Day 46：在 `crates/core` 抽象 `EmbeddingProvider` Trait**
+- [x] **Day 46：在 `crates/core` 抽象 `EmbeddingProvider` Trait**
   - **10 min 速览**：理解多嵌入模型路由架构（兼容 OpenAI `text-embedding-3-small` 与本地 Ollama `nomic-embed-text`）。
   - **30 min 实战**：
     1. 定义 `pub trait EmbeddingProvider: Send + Sync`，声明 `async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, AppError>`。
