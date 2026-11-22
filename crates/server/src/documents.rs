@@ -1,4 +1,5 @@
-use std::time::Instant;
+use std::{sync::OnceLock, time::Instant};
+use tokio::sync::Semaphore;
 
 use ai_parser::{
     DiffCalculator, DocumentChunk, DocumentChunker, DocumentChunkerConfig, DocumentFingerprint,
@@ -14,6 +15,13 @@ const MAX_DOCUMENT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_BATCH_FILES: usize = 100;
 const MIN_CHUNK_SIZE_TOKENS: usize = 32;
 const MAX_CHUNK_SIZE_TOKENS: usize = 4096;
+const MAX_CONCURRENT_PARSE_JOBS: usize = 8;
+
+static PARSE_SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
+
+fn parse_semaphore() -> &'static Semaphore {
+    PARSE_SEMAPHORE.get_or_init(|| Semaphore::new(MAX_CONCURRENT_PARSE_JOBS))
+}
 
 #[derive(Debug, Deserialize)]
 pub struct ParseDocumentRequest {
@@ -121,6 +129,10 @@ pub async fn parse_document(
         )));
     }
 
+    let _permit = parse_semaphore()
+        .try_acquire()
+        .map_err(|_| AppError::ServiceUnavailable("document parser is busy; please retry shortly".to_string()))?;
+
     let content = payload.content;
     let (document, fingerprint, parse_time_ms) = tokio::task::spawn_blocking(move || {
         let start = Instant::now();
@@ -155,6 +167,10 @@ pub async fn parse_documents_batch(
         )));
     }
 
+    let _permit = parse_semaphore()
+        .try_acquire()
+        .map_err(|_| AppError::ServiceUnavailable("document parser is busy; please retry shortly".to_string()))?;
+
     let files = payload.files;
     let response = tokio::task::spawn_blocking(move || {
         let start = Instant::now();
@@ -183,10 +199,17 @@ pub async fn parse_documents_batch(
                             fingerprint,
                         })
                     }
-                    Err(err) => Err(ParseBatchFailure {
+                    Err(ParseError::UnsupportedLanguage(ext)) => Err(ParseBatchFailure {
                         filename: name,
-                        error: err.to_string(),
+                        error: format!("unsupported file extension '{ext}'. Supported: .md, .mdx, .txt, .rs, .ts, .tsx, .py"),
                     }),
+                    Err(err) => {
+                        tracing::warn!(filename = %name, error = %err, "Batch parse failed for file");
+                        Err(ParseBatchFailure {
+                            filename: name,
+                            error: "failed to parse document".to_string(),
+                        })
+                    }
                 }
             })
             .collect();
@@ -253,6 +276,10 @@ pub async fn chunk_document(
         encoding: payload.encoding,
         include_context_headers: payload.include_context_headers,
     };
+    let _permit = parse_semaphore()
+        .try_acquire()
+        .map_err(|_| AppError::ServiceUnavailable("document chunker is busy; please retry shortly".to_string()))?;
+
     let content = payload.content;
 
     let response = tokio::task::spawn_blocking(move || {
@@ -300,7 +327,9 @@ mod tests {
     fn test_router() -> axum::Router {
         let config = AppConfig {
             app_env: "test".to_string(),
+            host: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             port: 0,
+            run_migrations: false,
             cors_allow_origins: vec!["http://localhost:3000".to_string()],
             llm_api_base: "https://api.deepseek.com/v1".to_string(),
             llm_api_key: String::new(),

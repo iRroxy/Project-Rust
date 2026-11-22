@@ -18,7 +18,7 @@ import {
   Layers,
   Scissors,
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -41,6 +41,9 @@ interface ParsedEntry {
 }
 
 type InspectorTab = "outline" | "chunks";
+
+const MAX_BATCH_FILES = 100;
+const MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024;
 
 const SAMPLE_RUST = {
   filename: "crates/engine/src/retriever.rs",
@@ -145,8 +148,11 @@ export default function DocumentsPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const selectedEntry = entries.find((e) => e.id === selectedId) ?? entries[0] ?? null;
 
-  const parseFilesPayload = async (files: Array<{ filename: string; content: string }>) => {
-    if (files.length === 0) return;
+  const parseFilesPayload = async (
+    files: Array<{ filename: string; content: string }>,
+    skippedReasons: string[] = []
+  ) => {
+    if (files.length === 0 || isParsing) return;
     setIsParsing(true);
     setErrorMsg(null);
 
@@ -163,9 +169,14 @@ export default function DocumentsPage() {
         setEntries((prev) => [newEntry, ...prev]);
         setSelectedId(newEntry.id);
         setBatchStats({ count: 1, elapsedMs: res.parse_time_ms });
+        if (skippedReasons.length > 0) {
+          setErrorMsg(`部分文件跳过 (${skippedReasons.length}): ${skippedReasons.join("; ")}`);
+        }
       } else {
         const res = await api.parseDocumentsBatch(files);
-        const contentMap = new Map(files.map((f) => [f.filename.replace(/\\/g, "/"), f.content]));
+        const contentMap = new Map(
+          files.map((f) => [f.filename.trim().replace(/\\/g, "/"), f.content])
+        );
         const now = Date.now();
         const perFileAvg = res.parsed.length > 0 ? res.elapsed_ms / res.parsed.length : 0;
         const newEntries: ParsedEntry[] = res.parsed.map((item, idx) => ({
@@ -180,11 +191,12 @@ export default function DocumentsPage() {
           setSelectedId(newEntries[0].id);
         }
         setBatchStats({ count: res.parsed.length, elapsedMs: res.elapsed_ms });
-        if (res.failed.length > 0) {
-          setErrorMsg(
-            `部分文件跳过 (${res.failed.length}): ` +
-              res.failed.map((f) => `${f.filename} (${f.error})`).join("; ")
-          );
+        const allSkipped = [
+          ...skippedReasons,
+          ...res.failed.map((f) => `${f.filename} (${f.error})`),
+        ];
+        if (allSkipped.length > 0) {
+          setErrorMsg(`部分文件跳过 (${allSkipped.length}): ${allSkipped.join("; ")}`);
         }
       }
     } catch (err: unknown) {
@@ -196,29 +208,60 @@ export default function DocumentsPage() {
   };
 
   const handleFileList = async (fileList: FileList | null) => {
-    if (!fileList || fileList.length === 0) return;
-    const files: Array<{ filename: string; content: string }> = [];
-    for (const file of Array.from(fileList)) {
-      const content = await file.text();
-      files.push({ filename: file.name, content });
+    if (!fileList || fileList.length === 0 || isParsing) return;
+
+    const rawFiles = Array.from(fileList);
+    if (rawFiles.length > MAX_BATCH_FILES) {
+      setErrorMsg(`单次最多上传 ${MAX_BATCH_FILES} 个文件（当前选择了 ${rawFiles.length} 个）。`);
+      return;
     }
-    await parseFilesPayload(files);
+
+    const files: Array<{ filename: string; content: string }> = [];
+    const skipped: string[] = [];
+
+    for (const file of rawFiles) {
+      if (file.size > MAX_FILE_SIZE_BYTES) {
+        skipped.push(`${file.name} (超过 2 MB 上限)`);
+        continue;
+      }
+      try {
+        const content = await file.text();
+        if (!content.trim()) {
+          skipped.push(`${file.name} (文件内容为空)`);
+          continue;
+        }
+        files.push({ filename: file.name.trim(), content });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        skipped.push(`${file.name} (读取失败: ${msg})`);
+      }
+    }
+
+    if (files.length === 0) {
+      setErrorMsg(
+        skipped.length > 0
+          ? `未找到可解析文件: ${skipped.join("; ")}`
+          : "未找到可解析文件。"
+      );
+      return;
+    }
+
+    await parseFilesPayload(files, skipped);
   };
 
   const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     setIsDragging(false);
+    if (isParsing) return;
     await handleFileList(e.dataTransfer.files);
   };
 
   const handleRemoveEntry = (id: string) => {
-    setEntries((prev) => {
-      const next = prev.filter((item) => item.id !== id);
-      if (selectedId === id) {
-        setSelectedId(next[0]?.id ?? null);
-      }
-      return next;
-    });
+    const next = entries.filter((item) => item.id !== id);
+    setEntries(next);
+    if (selectedId === id) {
+      setSelectedId(next[0]?.id ?? null);
+    }
   };
 
   return (
@@ -226,11 +269,16 @@ export default function DocumentsPage() {
       {/* Top Header */}
       <header className="flex h-13 shrink-0 items-center justify-between border-b px-4">
         <div className="flex items-center gap-3">
-          <Link href="/">
-            <Button size="sm" variant="ghost" className="h-8 gap-1.5 px-2 text-xs">
-              <ArrowLeft className="h-3.5 w-3.5" />
-              <span>返回对话</span>
-            </Button>
+          <Link
+            href="/"
+            className={buttonVariants({
+              size: "sm",
+              variant: "ghost",
+              className: "h-8 gap-1.5 px-2 text-xs",
+            })}
+          >
+            <ArrowLeft className="h-3.5 w-3.5" />
+            <span>返回对话</span>
           </Link>
           <Separator orientation="vertical" className="h-5" />
           <div className="flex items-center gap-2">
@@ -278,17 +326,35 @@ export default function DocumentsPage() {
         <aside className="flex w-80 shrink-0 flex-col border-r bg-muted/20">
           <div className="p-3">
             <div
+              role="button"
+              tabIndex={isParsing ? -1 : 0}
+              aria-disabled={isParsing}
+              aria-label="上传代码或文档文件"
               onDragOver={(e) => {
                 e.preventDefault();
-                setIsDragging(true);
+                if (!isParsing) {
+                  setIsDragging(true);
+                }
               }}
               onDragLeave={() => setIsDragging(false)}
               onDrop={handleDrop}
-              onClick={() => fileInputRef.current?.click()}
-              className={`flex cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed p-5 text-center transition-colors ${
-                isDragging
-                  ? "border-primary bg-primary/5"
-                  : "border-muted-foreground/25 hover:border-primary/50 hover:bg-muted/40"
+              onClick={() => {
+                if (!isParsing) {
+                  fileInputRef.current?.click();
+                }
+              }}
+              onKeyDown={(e) => {
+                if (!isParsing && (e.key === "Enter" || e.key === " ")) {
+                  e.preventDefault();
+                  fileInputRef.current?.click();
+                }
+              }}
+              className={`flex flex-col items-center justify-center rounded-lg border-2 border-dashed p-5 text-center transition-colors ${
+                isParsing
+                  ? "cursor-not-allowed border-muted-foreground/20 opacity-60"
+                  : isDragging
+                    ? "cursor-pointer border-primary bg-primary/5"
+                    : "cursor-pointer border-muted-foreground/25 hover:border-primary/50 hover:bg-muted/40"
               }`}
             >
               <Upload className="mb-2 h-6 w-6 text-muted-foreground" />
@@ -296,12 +362,13 @@ export default function DocumentsPage() {
                 {isParsing ? "Rust 引擎解析中..." : "拖拽文件到此处，或点击上传"}
               </p>
               <p className="mt-1 font-mono text-[10px] text-muted-foreground">
-                支持 .md .mdx .txt .rs .ts .tsx .py（支持多文件并发）
+                支持 .md .mdx .txt .rs .ts .tsx .py（单文件 &le; 2 MB，最多 100 文件）
               </p>
               <input
                 ref={fileInputRef}
                 type="file"
                 multiple
+                disabled={isParsing}
                 accept=".md,.mdx,.markdown,.txt,.rs,.ts,.tsx,.py"
                 className="hidden"
                 onChange={(e) => {
@@ -312,7 +379,10 @@ export default function DocumentsPage() {
             </div>
 
             {errorMsg && (
-              <div className="mt-2.5 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-2.5 text-[11px] text-destructive">
+              <div
+                role="alert"
+                className="mt-2.5 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-2.5 text-[11px] text-destructive"
+              >
                 <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                 <span className="break-all">{errorMsg}</span>
               </div>
@@ -379,7 +449,8 @@ export default function DocumentsPage() {
                       <Button
                         size="icon"
                         variant="ghost"
-                        className="h-6 w-6 shrink-0 opacity-0 group-hover:opacity-100"
+                        aria-label={`移除文档 ${entry.document.path}`}
+                        className="h-6 w-6 shrink-0 opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
                         onClick={(e) => {
                           e.stopPropagation();
                           handleRemoveEntry(entry.id);

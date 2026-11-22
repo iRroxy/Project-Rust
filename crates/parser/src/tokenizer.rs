@@ -143,8 +143,18 @@ impl TokenCounter {
         let mut start = 0usize;
 
         while start < tokens.len() {
-            // Advance start past any leading UTF-8 continuation bytes caused by overlap
+            // Skip any leading UTF-8 continuation bytes caused by overlap in O(1) per token
+            // rather than running `max_tokens` failed full-slice decodes.
             let mut aligned_start = start;
+            while aligned_start < tokens.len()
+                && starts_with_utf8_continuation(bpe, tokens[aligned_start])
+            {
+                aligned_start += 1;
+            }
+            if aligned_start >= tokens.len() {
+                break;
+            }
+
             let mut end = (aligned_start + max_tokens).min(tokens.len());
 
             // Try to find the widest valid UTF-8 slice within [aligned_start..end]
@@ -187,6 +197,16 @@ impl TokenCounter {
 
         windows
     }
+}
+
+/// Returns true if the first byte of a single BPE token is a UTF-8 continuation byte (`10xxxxxx`).
+fn starts_with_utf8_continuation(bpe: &CoreBPE, token: Rank) -> bool {
+    let bytes = bpe._decode_native_and_split(vec![token]);
+    bytes
+        .into_iter()
+        .flatten()
+        .next()
+        .is_some_and(|b| (b & 0xC0) == 0x80)
 }
 
 /// Strictly decode token slice into UTF-8, rejecting incomplete multi-byte sequences.

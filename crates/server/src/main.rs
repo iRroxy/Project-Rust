@@ -135,23 +135,35 @@ async fn main() {
         .init();
 
     let config = AppConfig::from_env();
+    let host = config.host;
     let port = config.port;
+    let run_migrations = config.run_migrations;
     let db = ai_db::connect(&config.database_url)
         .await
         .expect("Failed to connect to PostgreSQL");
     tracing::info!("database pool ready");
-    let state = AppState::new(config, db);
 
+    if run_migrations {
+        ai_db::run_migrations(&db)
+            .await
+            .expect("Failed to run database migrations");
+        tracing::info!("database migrations up to date");
+    }
+
+    let state = AppState::new(config, db);
     let app = build_app(state);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let addr = SocketAddr::from((host, port));
     tracing::info!("server listening on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("Failed to bind TCP listener");
 
-    axum::serve(listener, app).await.expect("Server error");
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .expect("Server error");
 }
 
 pub fn build_app(state: AppState) -> Router {
@@ -171,12 +183,23 @@ pub fn build_app(state: AppState) -> Router {
         .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
         .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
 
-    Router::new()
+    let llm_routes = Router::new()
+        .route("/api/analyze", post(analyze))
+        .route("/api/chat", post(chat))
+        .route("/api/conversations/{id}/chat", post(conversations::chat))
+        .route(
+            "/api/conversations/{id}/chat/stream",
+            post(conversations::chat_stream),
+        )
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(120),
+        ));
+
+    let standard_routes = Router::new()
         .route("/api/health", get(health_check))
         .route("/api/models", get(list_models))
-        .route("/api/analyze", post(analyze))
         .route("/api/echo", post(echo))
-        .route("/api/chat", post(chat))
         .route(
             "/api/conversations",
             get(conversations::list_conversations).post(conversations::create_conversation),
@@ -189,25 +212,35 @@ pub fn build_app(state: AppState) -> Router {
             "/api/conversations/{id}/messages",
             get(conversations::list_messages),
         )
-        .route("/api/conversations/{id}/chat", post(conversations::chat))
         .route(
-            "/api/conversations/{id}/chat/stream",
-            post(conversations::chat_stream),
+            "/api/documents/parse",
+            post(documents::parse_document).layer(DefaultBodyLimit::max(4 * 1024 * 1024)),
         )
-        .route("/api/documents/parse", post(documents::parse_document))
-        .route("/api/documents/chunk", post(documents::chunk_document))
+        .route(
+            "/api/documents/chunk",
+            post(documents::chunk_document).layer(DefaultBodyLimit::max(4 * 1024 * 1024)),
+        )
         .route(
             "/api/documents/parse-batch",
             post(documents::parse_documents_batch).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
         )
         .route("/api/stream-demo", get(stream::demo))
-        .layer(TraceLayer::new_for_http())
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(30),
-        ))
+        ));
+
+    Router::new()
+        .merge(llm_routes)
+        .merge(standard_routes)
+        .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)
+}
+
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+    tracing::info!("shutdown signal received, draining connections");
 }
 
 #[cfg(test)]
@@ -220,7 +253,9 @@ mod tests {
     fn test_config(reasoning_model: Option<&str>) -> AppConfig {
         AppConfig {
             app_env: "test".to_string(),
+            host: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             port: 0,
+            run_migrations: false,
             cors_allow_origins: vec![
                 "http://localhost:3000".to_string(),
                 "http://127.0.0.1:3000".to_string(),

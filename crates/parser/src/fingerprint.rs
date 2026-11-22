@@ -45,22 +45,34 @@ impl DiffSummary {
     }
 }
 
+fn disambiguate_unit_key(base: String, seen: &mut HashMap<String, usize>) -> String {
+    let count = seen.entry(base.clone()).or_insert(0);
+    *count += 1;
+    if *count == 1 {
+        base
+    } else {
+        format!("{base}#{}", *count)
+    }
+}
+
 pub struct DiffCalculator;
 
 impl DiffCalculator {
     /// Generate a document-level and section/symbol-level Blake3 fingerprint.
     pub fn fingerprint_document(doc: &ParsedDocument) -> DocumentFingerprint {
+        let mut seen_keys: HashMap<String, usize> = HashMap::new();
         let unit_hashes = match &doc.content {
             DocumentContent::Markdown(md) => md
                 .sections
                 .iter()
                 .enumerate()
                 .map(|(idx, section)| {
-                    let key = if section.breadcrumbs.is_empty() {
+                    let base_key = if section.breadcrumbs.is_empty() {
                         format!("section:{idx}")
                     } else {
                         format!("md:{}", section.breadcrumbs.join(" > "))
                     };
+                    let key = disambiguate_unit_key(base_key, &mut seen_keys);
                     let mut hasher = blake3::Hasher::new();
                     hasher.update(section.title.as_bytes());
                     hasher.update(b"\0");
@@ -75,7 +87,8 @@ impl DiffCalculator {
                 .symbols
                 .iter()
                 .map(|sym| {
-                    let key = format!("{:?}:{}", sym.kind, sym.name);
+                    let base_key = format!("{:?}:{}", sym.kind, sym.name);
+                    let key = disambiguate_unit_key(base_key, &mut seen_keys);
                     let mut hasher = blake3::Hasher::new();
                     if let Some(doc_comment) = &sym.docstring {
                         hasher.update(doc_comment.as_bytes());
@@ -230,5 +243,29 @@ pub fn added() -> i32 { 99 }
         assert_eq!(unit_diff.modified, vec!["Function:changed"]);
         assert_eq!(unit_diff.removed, vec!["Function:deleted"]);
         assert_eq!(unit_diff.added, vec!["Function:added"]);
+    }
+
+    #[test]
+    fn test_duplicate_unit_keys_are_disambiguated() {
+        let v1 = r#"struct A;
+struct B;
+impl A { fn new() -> Self { Self } }
+impl B { fn new() -> Self { Self } }
+"#;
+        let v2 = r#"struct A;
+struct B;
+impl A { fn new() -> Self { Self } }
+impl B { fn new() -> Self { let _ = 1; Self } }
+"#;
+        let fp1 = DiffCalculator::fingerprint_document(
+            &RepositoryScanner::parse_content("dup.rs", v1).unwrap(),
+        );
+        let fp2 = DiffCalculator::fingerprint_document(
+            &RepositoryScanner::parse_content("dup.rs", v2).unwrap(),
+        );
+
+        let diff = DiffCalculator::diff_units(&fp1, &fp2);
+        assert!(diff.unchanged.contains(&"Method:new".to_string()));
+        assert!(diff.modified.contains(&"Method:new#2".to_string()));
     }
 }

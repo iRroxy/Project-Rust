@@ -29,6 +29,11 @@ interface ChunkInspectorProps {
   content: string;
 }
 
+interface ChunkResultSnapshot {
+  data: ChunkDocumentResponse;
+  maxTokens: number;
+}
+
 const CHUNK_ACCENT_BORDERS = [
   "border-l-blue-500",
   "border-l-emerald-500",
@@ -45,7 +50,7 @@ export function ChunkInspector({ filename, content }: ChunkInspectorProps) {
   const [includeHeaders, setIncludeHeaders] = useState<boolean>(true);
   const [showRawOnly, setShowRawOnly] = useState<boolean>(false);
 
-  const [result, setResult] = useState<ChunkDocumentResponse | null>(null);
+  const [snapshot, setSnapshot] = useState<ChunkResultSnapshot | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -54,38 +59,50 @@ export function ChunkInspector({ filename, content }: ChunkInspectorProps) {
   const safeOverlap = Math.min(overlapTokens, maxAllowedOverlap);
 
   useEffect(() => {
-    let cancelled = false;
+    if (!content.trim()) {
+      setSnapshot(null);
+      setErrorMsg(null);
+      setIsLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    const requestMaxTokens = maxTokens;
     const timer = setTimeout(async () => {
       setIsLoading(true);
       setErrorMsg(null);
       try {
-        const res = await api.chunkDocument({
-          filename,
-          content,
-          max_tokens: maxTokens,
-          overlap_tokens: safeOverlap,
-          min_chunk_tokens: Math.min(32, Math.floor(maxTokens / 4)),
-          encoding,
-          include_context_headers: includeHeaders,
-        });
-        if (!cancelled) {
-          setResult(res);
+        const res = await api.chunkDocument(
+          {
+            filename,
+            content,
+            max_tokens: requestMaxTokens,
+            overlap_tokens: safeOverlap,
+            min_chunk_tokens: Math.min(32, Math.floor(requestMaxTokens / 4)),
+            encoding,
+            include_context_headers: includeHeaders,
+          },
+          controller.signal
+        );
+        if (!controller.signal.aborted) {
+          setSnapshot({ data: res, maxTokens: requestMaxTokens });
         }
       } catch (err: unknown) {
-        if (!cancelled) {
+        if (!controller.signal.aborted) {
+          setSnapshot(null);
           const msg = err instanceof Error ? err.message : String(err);
           setErrorMsg(`切块计算失败: ${msg}`);
         }
       } finally {
-        if (!cancelled) {
+        if (!controller.signal.aborted) {
           setIsLoading(false);
         }
       }
     }, 150);
 
     return () => {
-      cancelled = true;
       clearTimeout(timer);
+      controller.abort();
     };
   }, [filename, content, maxTokens, safeOverlap, encoding, includeHeaders]);
 
@@ -99,6 +116,9 @@ export function ChunkInspector({ filename, content }: ChunkInspectorProps) {
       // clipboard unavailable
     }
   };
+
+  const result = snapshot?.data ?? null;
+  const resultMaxTokens = snapshot?.maxTokens ?? maxTokens;
 
   return (
     <div className="space-y-4">
@@ -210,7 +230,10 @@ export function ChunkInspector({ filename, content }: ChunkInspectorProps) {
       </Card>
 
       {errorMsg && (
-        <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
+        <div
+          role="alert"
+          className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive"
+        >
           <AlertCircle className="h-4 w-4 shrink-0" />
           <span>{errorMsg}</span>
         </div>
@@ -250,14 +273,21 @@ export function ChunkInspector({ filename, content }: ChunkInspectorProps) {
       )}
 
       {/* Chunk Cards */}
-      {result && result.chunks.length === 0 ? (
+      {!content.trim() ? (
+        <Card className="p-8 text-center text-xs text-muted-foreground">
+          当前文档无有效文本内容，无法执行切块。
+        </Card>
+      ) : result && result.chunks.length === 0 ? (
         <Card className="p-8 text-center text-xs text-muted-foreground">
           未生成任何有效 Chunk。
         </Card>
       ) : (
         <div className="space-y-3">
           {result?.chunks.map((chunk, idx) => {
-            const utilization = Math.min(100, Math.round((chunk.token_count / maxTokens) * 100));
+            const utilization = Math.min(
+              100,
+              Math.round((chunk.token_count / Math.max(1, resultMaxTokens)) * 100)
+            );
             const borderClass = CHUNK_ACCENT_BORDERS[idx % CHUNK_ACCENT_BORDERS.length];
             const barColor =
               utilization >= 90
@@ -322,7 +352,7 @@ export function ChunkInspector({ filename, content }: ChunkInspectorProps) {
                         />
                       </div>
                       <span className="font-mono text-[11px] font-medium tabular-nums">
-                        {chunk.token_count}/{maxTokens} tok ({utilization}%)
+                        {chunk.token_count}/{resultMaxTokens} tok ({utilization}%)
                       </span>
                     </div>
 
@@ -331,6 +361,7 @@ export function ChunkInspector({ filename, content }: ChunkInspectorProps) {
                       variant="ghost"
                       className="h-6 w-6"
                       title="复制 Chunk 内容"
+                      aria-label="复制 Chunk 内容"
                       onClick={() => void handleCopy(chunk)}
                     >
                       {copiedId === chunk.chunk_id ? (

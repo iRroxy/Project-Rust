@@ -1,12 +1,50 @@
 use crate::llm::ChatMessage;
 use anyhow::{Context, Result, bail};
 use futures_util::Stream;
+use jsonschema::Validator;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::{collections::HashMap, fmt, future::Future, pin::Pin, sync::Arc};
+use std::{
+    any::TypeId,
+    collections::HashMap,
+    fmt,
+    future::Future,
+    pin::Pin,
+    sync::{Arc, OnceLock, RwLock},
+};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub type TokenStream = Pin<Box<dyn Stream<Item = Result<String>> + Send>>;
+
+type CachedSchema = (Arc<serde_json::Value>, Arc<Validator>);
+static STRUCTURED_SCHEMA_CACHE: OnceLock<RwLock<HashMap<TypeId, CachedSchema>>> = OnceLock::new();
+
+fn cached_schema_for<T: JsonSchema + 'static>() -> Result<CachedSchema> {
+    let type_id = TypeId::of::<StructuredOutput<T>>();
+    let cache = STRUCTURED_SCHEMA_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+
+    if let Ok(guard) = cache.read()
+        && let Some(entry) = guard.get(&type_id)
+    {
+        return Ok(entry.clone());
+    }
+
+    // An object envelope also supports arrays, scalars, and nullable Rust types.
+    let schema = Arc::new(serde_json::to_value(schemars::schema_for!(
+        StructuredOutput<T>
+    ))?);
+    let validator = Arc::new(
+        jsonschema::options()
+            .should_validate_formats(true)
+            .build(&schema)
+            .map_err(|error| anyhow::anyhow!("Invalid structured output schema: {error}"))?,
+    );
+
+    if let Ok(mut guard) = cache.write() {
+        guard.insert(type_id, (Arc::clone(&schema), Arc::clone(&validator)));
+    }
+    Ok((schema, validator))
+}
 
 /// Logical model routing tier.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -157,7 +195,7 @@ pub async fn generate_structured<P, T>(
 ) -> Result<T>
 where
     P: ModelProvider + ?Sized,
-    T: JsonSchema + DeserializeOwned,
+    T: JsonSchema + DeserializeOwned + 'static,
 {
     let prompt = prompt.trim();
     if prompt.is_empty() {
@@ -165,19 +203,14 @@ where
     }
     provider.resolve_model(selection)?;
 
-    // An object envelope also supports arrays, scalars, and nullable Rust types.
-    let schema = serde_json::to_value(schemars::schema_for!(StructuredOutput<T>))?;
-    let validator = jsonschema::options()
-        .should_validate_formats(true)
-        .build(&schema)
-        .map_err(|error| anyhow::anyhow!("Invalid structured output schema: {error}"))?;
+    let (schema, validator) = cached_schema_for::<T>()?;
 
     let value = provider
         .structured_completion(prompt, &schema, selection)
         .await?;
     if let Err(error) = validator.validate(&value) {
         bail!(
-            "Structured output violates JSON schema at {}",
+            "Structured output violates JSON schema at {}: {error}",
             error.instance_path()
         );
     }
@@ -254,8 +287,8 @@ impl ModelRouter {
         })
     }
 
-    /// Register or replace a routing target for `tier`, also registering its model identifier
-    /// if not already bound.
+    /// Register or replace a routing target for `tier`, also updating its model identifier route
+    /// so tier and explicit model lookups stay consistent.
     pub fn with_tier(
         mut self,
         tier: ModelTier,
@@ -263,9 +296,7 @@ impl ModelRouter {
         model: impl Into<String>,
     ) -> Result<Self, ModelSelectionError> {
         let route = ModelRoute::new(provider, model)?;
-        self.models
-            .entry(route.model.clone())
-            .or_insert_with(|| route.clone());
+        self.models.insert(route.model.clone(), route.clone());
         self.tiers.insert(tier, route);
         Ok(self)
     }

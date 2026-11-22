@@ -13,6 +13,9 @@ pub enum AppError {
     #[error("{0}")]
     BadRequest(String),
 
+    #[error("{0}")]
+    ServiceUnavailable(String),
+
     #[error("Internal server error")]
     Internal(#[from] anyhow::Error),
 
@@ -39,8 +42,22 @@ impl IntoResponse for AppError {
                 "NOT_FOUND",
                 "resource not found".to_string(),
             ),
+            AppError::Database(sqlx::Error::PoolTimedOut) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "SERVICE_UNAVAILABLE",
+                "database connection pool exhausted; please retry".to_string(),
+            ),
+            AppError::Database(sqlx::Error::Database(db_err))
+                if db_err.code().as_deref() == Some("23503") =>
+            {
+                (
+                    StatusCode::NOT_FOUND,
+                    "NOT_FOUND",
+                    "referenced resource not found".to_string(),
+                )
+            }
             AppError::Database(err) => {
-                tracing::error!(error =?err, "Database error occurred");
+                tracing::error!(error = ?err, "Database error occurred");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "DATABASE_ERROR",
@@ -49,6 +66,11 @@ impl IntoResponse for AppError {
             }
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, "NOT_FOUND", msg.clone()),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "BAD_REQUEST", msg.clone()),
+            AppError::ServiceUnavailable(msg) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "SERVICE_UNAVAILABLE",
+                msg.clone(),
+            ),
             AppError::Internal(err) => {
                 tracing::error!(error = ?err, "Internal server error occurred");
                 (

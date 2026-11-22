@@ -10,14 +10,40 @@ interface MarkdownMessageProps {
   content: string;
 }
 
+function safeUrlTransform(url: string): string {
+  const trimmed = url.trim();
+  if (/^(https?:|mailto:|#)/i.test(trimmed)) {
+    return trimmed;
+  }
+  return "";
+}
+
 export function MarkdownMessage({ content }: MarkdownMessageProps) {
   return (
-    <div className="prose prose-sm dark:prose-invert max-w-none break-words leading-relaxed">
+    <div className="max-w-none space-y-2 break-words leading-relaxed">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        disallowedElements={["img"]}
+        urlTransform={safeUrlTransform}
         components={{
-          code({ className, children, ...props }) {
-            const match = /language-(\w+)/.exec(className || "");
+          pre({ children }) {
+            return <>{children}</>;
+          },
+          a({ href, children }) {
+            return (
+              <a
+                href={href}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-primary underline underline-offset-2 hover:opacity-80"
+              >
+                {children}
+              </a>
+            );
+          },
+          code({ node: _node, className, children, ...props }) {
+            void _node;
+            const match = /language-([^\s]+)/.exec(className || "");
             const text = String(children).replace(/\n$/, "");
             const isInline = !match && !text.includes("\n");
 

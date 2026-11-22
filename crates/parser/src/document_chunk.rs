@@ -464,8 +464,23 @@ impl<'a> OffsetLocator<'a> {
                         .count()
                 };
 
-                self.cursor_byte = start.min(self.source.len());
-                self.cursor_line = start_line;
+                // Advance cursor by at least one UTF-8 character so consecutive chunks with
+                // identical leading lines do not re-match the exact same prior offset.
+                let next_cursor = if start < self.source.len() {
+                    let mut n = start + 1;
+                    while n < self.source.len() && !self.source.is_char_boundary(n) {
+                        n += 1;
+                    }
+                    n
+                } else {
+                    self.source.len()
+                };
+                let cursor_newlines = self.source[start..next_cursor]
+                    .bytes()
+                    .filter(|&b| b == b'\n')
+                    .count();
+                self.cursor_byte = next_cursor;
+                self.cursor_line = start_line + cursor_newlines;
 
                 let extra_lines = self.source[start..safe_end]
                     .bytes()
@@ -483,16 +498,7 @@ impl<'a> OffsetLocator<'a> {
                     }),
                 )
             }
-            None => (
-                ByteRange {
-                    start: 0,
-                    end: self.source.len(),
-                },
-                Some(LineRange {
-                    start: 1,
-                    end: self.source.lines().count().max(1),
-                }),
-            ),
+            None => (ByteRange { start: 0, end: 0 }, None),
         }
     }
 }

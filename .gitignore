@@ -4,6 +4,9 @@
 
 # 环境变量与密钥
 .env
+.env.*
+!.env.example
+!.env.production.example
 
 # 学习计划与每日打卡表
 AI_FullStack_SaaS_1Year_Plan.md

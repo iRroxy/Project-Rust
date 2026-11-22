@@ -221,7 +221,9 @@ mod tests {
     fn test_app(pool: ai_db::PgPool, api_base: String, api_key: String) -> Router {
         let config = AppConfig {
             app_env: "test".to_string(),
+            host: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             port: 0,
+            run_migrations: false,
             cors_allow_origins: vec!["http://localhost:3000".to_string()],
             llm_api_base: api_base,
             llm_api_key: api_key,
@@ -329,7 +331,9 @@ mod tests {
             .unwrap();
         let config = AppConfig {
             app_env: "test".to_string(),
+            host: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             port: 0,
+            run_migrations: false,
             cors_allow_origins: vec!["http://localhost:3000".to_string()],
             llm_api_base: format!("http://{fast_addr}"),
             llm_api_key: "fast-key".to_string(),

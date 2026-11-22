@@ -1,4 +1,5 @@
 import type {
+  ApiErrorResponse,
   ChunkDocumentRequest,
   ChunkDocumentResponse,
   Conversation,
@@ -7,11 +8,17 @@ import type {
   ModelTier,
   ParseBatchResponse,
   ParseDocumentResponse,
+  StreamDonePayload,
   TechReport,
 } from "@/types/api";
 
 const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE?.replace(/\/$/, "") || "http://127.0.0.1:3000";
+
+export type ModelRoutingOption =
+  | { tier: ModelTier; model?: never }
+  | { model: string; tier?: never }
+  | { tier?: undefined; model?: undefined };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -25,7 +32,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!res.ok) {
     let message = `Request failed: ${res.status}`;
     try {
-      const err = await res.json();
+      const err = (await res.json()) as Partial<ApiErrorResponse>;
       if (err?.error?.message) {
         message = err.error.message;
       }
@@ -43,9 +50,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  getModels: () => request<ModelsInfo>("/api/models"),
+  getModels: (signal?: AbortSignal) => request<ModelsInfo>("/api/models", { signal }),
 
-  listConversations: () => request<Conversation[]>("/api/conversations"),
+  listConversations: (signal?: AbortSignal) =>
+    request<Conversation[]>("/api/conversations", { signal }),
 
   createConversation: (title?: string) =>
     request<Conversation>("/api/conversations", {
@@ -58,31 +66,48 @@ export const api = {
       method: "DELETE",
     }),
 
-  listMessages: (conversationId: string, limit = 50) =>
-    request<Message[]>(`/api/conversations/${conversationId}/messages?limit=${limit}`),
-
-  analyzeTechReport: (prompt: string, tier?: ModelTier, model?: string) =>
-    request<TechReport>("/api/analyze", {
-      method: "POST",
-      body: JSON.stringify({ prompt, tier, model }),
+  listMessages: (conversationId: string, limit = 50, signal?: AbortSignal) =>
+    request<Message[]>(`/api/conversations/${conversationId}/messages?limit=${limit}`, {
+      signal,
     }),
 
-  parseDocument: (filename: string, content: string) =>
+  analyzeTechReport: (
+    prompt: string,
+    routing?: ModelRoutingOption,
+    signal?: AbortSignal
+  ) =>
+    request<TechReport>("/api/analyze", {
+      method: "POST",
+      body: JSON.stringify({
+        prompt,
+        ...(routing?.tier ? { tier: routing.tier } : {}),
+        ...(routing?.model ? { model: routing.model } : {}),
+      }),
+      signal,
+    }),
+
+  parseDocument: (filename: string, content: string, signal?: AbortSignal) =>
     request<ParseDocumentResponse>("/api/documents/parse", {
       method: "POST",
       body: JSON.stringify({ filename, content }),
+      signal,
     }),
 
-  parseDocumentsBatch: (files: Array<{ filename: string; content: string }>) =>
+  parseDocumentsBatch: (
+    files: Array<{ filename: string; content: string }>,
+    signal?: AbortSignal
+  ) =>
     request<ParseBatchResponse>("/api/documents/parse-batch", {
       method: "POST",
       body: JSON.stringify({ files }),
+      signal,
     }),
 
-  chunkDocument: (payload: ChunkDocumentRequest) =>
+  chunkDocument: (payload: ChunkDocumentRequest, signal?: AbortSignal) =>
     request<ChunkDocumentResponse>("/api/documents/chunk", {
       method: "POST",
       body: JSON.stringify(payload),
+      signal,
     }),
 };
 
@@ -92,14 +117,37 @@ export interface StreamChatCallbacks {
   onError: (error: Error) => void;
 }
 
+export type StreamChatOptions = ModelRoutingOption & {
+  signal?: AbortSignal;
+};
+
+function parseSseBlock(eventBlock: string): { eventType: string; data: string } | null {
+  if (!eventBlock.trim()) return null;
+
+  let eventType = "message";
+  const dataLines: string[] = [];
+
+  for (const line of eventBlock.split("\n")) {
+    if (line.startsWith(":")) {
+      // SSE comment / keep-alive
+      continue;
+    }
+    if (line.startsWith("event:")) {
+      eventType = line.slice(6).trim();
+    } else if (line.startsWith("data:")) {
+      const value = line.startsWith("data: ") ? line.slice(6) : line.slice(5);
+      dataLines.push(value);
+    }
+  }
+
+  if (dataLines.length === 0) return null;
+  return { eventType, data: dataLines.join("\n") };
+}
+
 export async function streamConversationChat(
   conversationId: string,
   prompt: string,
-  options: {
-    tier?: ModelTier;
-    model?: string;
-    signal?: AbortSignal;
-  },
+  options: StreamChatOptions,
   callbacks: StreamChatCallbacks
 ): Promise<void> {
   const url = `${API_BASE}/api/conversations/${conversationId}/chat/stream`;
@@ -111,8 +159,8 @@ export async function streamConversationChat(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         prompt,
-        tier: options.tier,
-        model: options.model,
+        ...(options.tier ? { tier: options.tier } : {}),
+        ...(options.model ? { model: options.model } : {}),
       }),
       signal: options.signal,
     });
@@ -126,7 +174,7 @@ export async function streamConversationChat(
   if (!response.ok) {
     let message = `Stream request failed: ${response.status}`;
     try {
-      const err = await response.json();
+      const err = (await response.json()) as Partial<ApiErrorResponse>;
       if (err?.error?.message) message = err.error.message;
     } catch {
       // ignore
@@ -145,55 +193,74 @@ export async function streamConversationChat(
 
   const decoder = new TextDecoder();
   let buffer = "";
+  let receivedTerminalEvent = false;
+
+  const dispatchBlock = (eventBlock: string): boolean => {
+    const parsed = parseSseBlock(eventBlock);
+    if (!parsed) return false;
+
+    const { eventType, data } = parsed;
+    if (eventType === "delta") {
+      try {
+        const chunk = JSON.parse(data);
+        callbacks.onDelta(typeof chunk === "string" ? chunk : String(chunk));
+      } catch {
+        callbacks.onDelta(data);
+      }
+      return false;
+    }
+
+    if (eventType === "done") {
+      receivedTerminalEvent = true;
+      try {
+        const payload = JSON.parse(data) as Partial<StreamDonePayload>;
+        callbacks.onDone(payload.message_id ?? "");
+      } catch {
+        callbacks.onDone("");
+      }
+      return true;
+    }
+
+    if (eventType === "error") {
+      receivedTerminalEvent = true;
+      let errorMsg = "Streaming error occurred";
+      try {
+        const payload = JSON.parse(data) as Partial<ApiErrorResponse>;
+        if (payload?.error?.message) errorMsg = payload.error.message;
+      } catch {
+        // ignore
+      }
+      callbacks.onError(new Error(errorMsg));
+      return true;
+    }
+
+    return false;
+  };
 
   try {
     while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done) {
+        buffer += decoder.decode().replace(/\r\n?/g, "\n");
+        if (buffer.trim()) {
+          dispatchBlock(buffer);
+        }
+        break;
+      }
 
-      buffer += decoder.decode(value, { stream: true });
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n?/g, "\n");
       const events = buffer.split("\n\n");
       buffer = events.pop() ?? "";
 
       for (const eventBlock of events) {
-        if (!eventBlock.trim()) continue;
-
-        let eventType = "message";
-        let data = "";
-
-        for (const line of eventBlock.split("\n")) {
-          if (line.startsWith("event:")) {
-            eventType = line.slice(6).trim();
-          } else if (line.startsWith("data:")) {
-            data = line.slice(5).trim();
-          }
-        }
-
-        if (eventType === "delta") {
-          try {
-            const chunk = JSON.parse(data);
-            callbacks.onDelta(typeof chunk === "string" ? chunk : String(chunk));
-          } catch {
-            callbacks.onDelta(data);
-          }
-        } else if (eventType === "done") {
-          try {
-            const payload = JSON.parse(data);
-            callbacks.onDone(payload.message_id);
-          } catch {
-            callbacks.onDone("");
-          }
-        } else if (eventType === "error") {
-          let errorMsg = "Streaming error occurred";
-          try {
-            const payload = JSON.parse(data);
-            if (payload?.error?.message) errorMsg = payload.error.message;
-          } catch {
-            // ignore
-          }
-          callbacks.onError(new Error(errorMsg));
+        if (dispatchBlock(eventBlock)) {
+          return;
         }
       }
+    }
+
+    if (!receivedTerminalEvent && !options.signal?.aborted) {
+      callbacks.onError(new Error("Stream ended unexpectedly before completion"));
     }
   } catch (err: unknown) {
     if (options.signal?.aborted) return;

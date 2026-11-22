@@ -7,12 +7,16 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::time::Duration;
 
+const NON_STREAM_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_ERROR_BODY_BYTES: usize = 1024;
+
 #[derive(Clone)]
 pub struct LlmClient {
     http: Client,
     api_base: String,
     api_key: String,
     model: String,
+    allow_mock: bool,
 }
 
 #[derive(Serialize)]
@@ -49,7 +53,9 @@ struct ChatChoice {
 
 #[derive(Deserialize)]
 struct ChatMessageResponse {
-    content: String,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
     refusal: Option<String>,
 }
 
@@ -68,20 +74,44 @@ struct ChatStreamDelta {
     content: Option<String>,
 }
 
+fn is_placeholder_key(api_key: &str) -> bool {
+    api_key.is_empty() || api_key == "sk-your-key-here"
+}
+
+fn truncate_error_body(body: &str) -> &str {
+    if body.len() <= MAX_ERROR_BODY_BYTES {
+        return body;
+    }
+    let mut end = MAX_ERROR_BODY_BYTES;
+    while end > 0 && !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    &body[..end]
+}
+
 impl LlmClient {
     pub fn new(api_base: String, api_key: String, model: String) -> Self {
         let http = Client::builder()
-            .timeout(Duration::from_secs(60))
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_secs(60))
             .pool_max_idle_per_host(10)
             .build()
             .expect("Failed to build reqwest client");
 
         Self {
             http,
-            api_base: api_base.trim_end_matches('/').to_string(),
-            api_key,
-            model,
+            api_base: api_base.trim().trim_end_matches('/').to_string(),
+            api_key: api_key.trim().to_string(),
+            model: model.trim().to_string(),
+            allow_mock: true,
         }
+    }
+
+    /// Control whether non-streaming `chat_completion` may fall back to a mock reply
+    /// when `LLM_API_KEY` is missing or placeholder (should be `false` in production).
+    pub fn with_mock_fallback(mut self, allow_mock: bool) -> Self {
+        self.allow_mock = allow_mock;
+        self
     }
 
     pub fn api_base(&self) -> &str {
@@ -93,7 +123,8 @@ impl LlmClient {
     }
 
     pub async fn chat_completion(&self, messages: &[ChatMessage<'_>]) -> Result<String> {
-        self.chat_completion_with_model(messages, &self.model).await
+        let model = self.resolve_model(ModelSelection::Default)?;
+        self.chat_completion_with_model(messages, &model).await
     }
 
     async fn chat_completion_with_model(
@@ -101,7 +132,10 @@ impl LlmClient {
         messages: &[ChatMessage<'_>],
         model: &str,
     ) -> Result<String> {
-        if self.api_key.is_empty() || self.api_key == "sk-your-key-here" {
+        if is_placeholder_key(&self.api_key) {
+            if !self.allow_mock {
+                bail!("LLM_API_KEY is required in production mode");
+            }
             tracing::warn!("LLM_API_KEY not configured, returning mock response");
 
             let prompt = messages
@@ -125,6 +159,7 @@ impl LlmClient {
         let resp = self
             .http
             .post(&url)
+            .timeout(NON_STREAM_TIMEOUT)
             .bearer_auth(&self.api_key)
             .json(&req_body)
             .send()
@@ -134,7 +169,11 @@ impl LlmClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let err_text = resp.text().await.unwrap_or_default();
-            bail!("LLM API returned error {}: {}", status, err_text);
+            bail!(
+                "LLM API returned error {}: {}",
+                status,
+                truncate_error_body(&err_text)
+            );
         }
 
         let data: ChatCompletionResponse = resp
@@ -142,12 +181,20 @@ impl LlmClient {
             .await
             .context("Failed to parse LLM response JSON")?;
 
-        let reply = data
+        let choice = data
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message.content)
-            .unwrap_or_default();
+            .context("LLM returned no completion choices")?;
+
+        if let Some(refusal) = choice.message.refusal {
+            bail!("LLM refused the request: {refusal}");
+        }
+
+        let reply = choice
+            .message
+            .content
+            .context("LLM returned null completion content")?;
 
         Ok(reply)
     }
@@ -155,7 +202,7 @@ impl LlmClient {
     /// Generate a JSON value guided by `T`'s schema, validate it, and decode it into `T`.
     pub async fn generate_structured<T>(&self, prompt: &str) -> Result<T>
     where
-        T: JsonSchema + DeserializeOwned,
+        T: JsonSchema + DeserializeOwned + 'static,
     {
         crate::provider::generate_structured(self, prompt, ModelSelection::Default).await
     }
@@ -170,7 +217,7 @@ impl LlmClient {
         if prompt.is_empty() {
             bail!("Structured output prompt cannot be empty");
         }
-        if self.api_key.is_empty() || self.api_key == "sk-your-key-here" {
+        if is_placeholder_key(&self.api_key) {
             bail!("LLM_API_KEY is required for structured output");
         }
 
@@ -192,6 +239,7 @@ impl LlmClient {
         let response = self
             .http
             .post(format!("{}/chat/completions", self.api_base))
+            .timeout(NON_STREAM_TIMEOUT)
             .bearer_auth(&self.api_key)
             .json(&ChatCompletionRequest {
                 model,
@@ -201,9 +249,17 @@ impl LlmClient {
             })
             .send()
             .await
-            .context("Failed to request structured output")?
-            .error_for_status()
-            .context("LLM rejected structured output request")?;
+            .context("Failed to request structured output")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let err_text = response.text().await.unwrap_or_default();
+            bail!(
+                "LLM rejected structured output request ({status}): {}",
+                truncate_error_body(&err_text)
+            );
+        }
+
         let data: ChatCompletionResponse = response
             .json()
             .await
@@ -213,24 +269,29 @@ impl LlmClient {
             .into_iter()
             .next()
             .context("LLM returned no structured output choices")?;
-        if choice.message.refusal.is_some() {
-            bail!("LLM refused the structured output request");
+        if let Some(refusal) = choice.message.refusal {
+            bail!("LLM refused the structured output request: {refusal}");
         }
         if choice.finish_reason.as_deref() != Some("stop") {
             bail!("LLM structured output did not finish normally");
         }
-        if choice.message.content.trim().is_empty() {
+        let content = choice
+            .message
+            .content
+            .context("LLM returned null structured output")?;
+        if content.trim().is_empty() {
             bail!("LLM returned empty structured output");
         }
 
-        serde_json::from_str(&choice.message.content).context("Invalid structured output JSON")
+        serde_json::from_str(&content).context("Invalid structured output JSON")
     }
 
     pub async fn chat_stream(
         &self,
         messages: &[ChatMessage<'_>],
     ) -> Result<impl Stream<Item = Result<String>> + Send + 'static + use<>> {
-        self.chat_stream_with_model(messages, &self.model).await
+        let model = self.resolve_model(ModelSelection::Default)?;
+        self.chat_stream_with_model(messages, &model).await
     }
 
     async fn chat_stream_with_model(
@@ -238,7 +299,7 @@ impl LlmClient {
         messages: &[ChatMessage<'_>],
         model: &str,
     ) -> Result<impl Stream<Item = Result<String>> + Send + 'static + use<>> {
-        if self.api_key.is_empty() || self.api_key == "sk-your-key-here" {
+        if is_placeholder_key(&self.api_key) {
             bail!("LLM_API_KEY is required for real token streaming");
         }
 
@@ -254,9 +315,16 @@ impl LlmClient {
             })
             .send()
             .await
-            .context("Failed to start LLM stream")?
-            .error_for_status()
-            .context("LLM rejected streaming request")?;
+            .context("Failed to start LLM stream")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let err_text = response.text().await.unwrap_or_default();
+            bail!(
+                "LLM rejected streaming request ({status}): {}",
+                truncate_error_body(&err_text)
+            );
+        }
 
         let body = response.bytes_stream();
 
@@ -268,14 +336,20 @@ impl LlmClient {
 
             while let Some(event) = events.next().await {
                 let event = event.context("Failed to read LLM SSE event")?;
+                let payload = event.data.trim();
 
-                if event.data.trim() == "[DONE]" {
+                // Skip empty SSE keep-alive frames
+                if payload.is_empty() {
+                    continue;
+                }
+
+                if payload == "[DONE]" {
                     done = true;
                     break;
                 }
 
                 let chunk: ChatStreamResponse =
-                    serde_json::from_str(&event.data)
+                    serde_json::from_str(payload)
                         .context("Invalid LLM stream JSON")?;
 
                 if let Some(choice) = chunk.choices.into_iter().next()
@@ -479,15 +553,17 @@ mod tests {
                     .is_err()
             );
         }
-        let mut response = completion(report_value(90));
-        response["choices"][0]["message"]["refusal"] = json!("Cannot comply");
+        // OpenAI refusal responses often set `content: null` alongside `refusal`.
+        let response = json!({"choices": [{
+            "finish_reason": "stop",
+            "message": {"content": null, "refusal": "Cannot comply"}
+        }]});
         let (client, _provider) = provider(StatusCode::OK, response).await;
-        assert!(
-            client
-                .generate_structured::<TechReport>("Assess Rust")
-                .await
-                .is_err()
-        );
+        let err = client
+            .generate_structured::<TechReport>("Assess Rust")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Cannot comply"));
     }
 
     #[tokio::test]
@@ -525,6 +601,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn production_mode_disables_mock_fallback() {
+        let client = LlmClient::new(
+            "http://127.0.0.1:9".into(),
+            String::new(),
+            "deepseek-chat".into(),
+        )
+        .with_mock_fallback(false);
+        let messages = [ChatMessage {
+            role: "user",
+            content: "hello",
+        }];
+        assert!(client.chat_completion(&messages).await.is_err());
+    }
+
+    #[tokio::test]
     async fn model_provider_forwards_dynamic_model_in_upstream_payloads() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -539,8 +630,9 @@ mod tests {
                     let model = payload["model"].as_str().unwrap_or_default().to_string();
                     recorded.lock().unwrap().push(model.clone());
                     if payload["stream"].as_bool() == Some(true) {
+                        // Include an empty keep-alive data frame before the real chunk
                         let sse = format!(
-                            "data: {{\"choices\":[{{\"delta\":{{\"content\":\"stream:{model}\"}}}}]}}\n\ndata: [DONE]\n\n"
+                            "data: \n\ndata: {{\"choices\":[{{\"delta\":{{\"content\":\"stream:{model}\"}}}}]}}\n\ndata: [DONE]\n\n"
                         );
                         (
                             StatusCode::OK,

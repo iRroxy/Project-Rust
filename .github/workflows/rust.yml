@@ -43,6 +43,11 @@ jobs:
           psql -v ON_ERROR_STOP=1 -h localhost -U ai_saas -d ai_saas -f "$file"
         done
 
+    - name: Clippy
+      env:
+        SQLX_OFFLINE: "true"
+      run: cargo clippy --workspace --all-targets -- -D warnings
+
     - name: Build
       env:
         SQLX_OFFLINE: "true"

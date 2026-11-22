@@ -2,9 +2,18 @@ use crate::error::{AppError, AppResult};
 use ai_core::{LlmClient, ModelProvider, ModelRouter, ModelSelection, ModelTier};
 use ai_db::PgPool;
 use serde::Serialize;
-use std::{env, sync::Arc};
+use std::{
+    env, fmt,
+    net::{IpAddr, Ipv4Addr},
+    sync::Arc,
+};
 
-const DEFAULT_CORS_ORIGINS: [&str; 2] = ["http://localhost:3000", "http://127.0.0.1:3000"];
+const DEFAULT_CORS_ORIGINS: [&str; 4] = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+];
 
 fn env_non_empty(key: &str) -> Option<String> {
     env::var(key)
@@ -35,10 +44,11 @@ fn parse_cors_origins(raw: Option<String>) -> Vec<String> {
     }
 }
 
-#[derive(Debug)]
 pub struct AppConfig {
     pub app_env: String,
+    pub host: IpAddr,
     pub port: u16,
+    pub run_migrations: bool,
     pub cors_allow_origins: Vec<String>,
     pub llm_api_base: String,
     pub llm_api_key: String,
@@ -49,26 +59,69 @@ pub struct AppConfig {
     pub database_url: String,
 }
 
+impl fmt::Debug for AppConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AppConfig")
+            .field("app_env", &self.app_env)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("run_migrations", &self.run_migrations)
+            .field("cors_allow_origins", &self.cors_allow_origins)
+            .field("llm_api_base", &self.llm_api_base)
+            .field("llm_api_key", &"[REDACTED]")
+            .field("llm_model", &self.llm_model)
+            .field("llm_reasoning_model", &self.llm_reasoning_model)
+            .field("llm_reasoning_api_base", &self.llm_reasoning_api_base)
+            .field(
+                "llm_reasoning_api_key",
+                &self.llm_reasoning_api_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("database_url", &"[REDACTED]")
+            .finish()
+    }
+}
+
 impl AppConfig {
     pub fn from_env() -> Self {
-        let app_env = env::var("APP_ENV").unwrap_or_else(|_| "development".to_string());
-        let port = env::var("PORT")
-            .ok()
-            .and_then(|p| p.parse::<u16>().ok())
-            .unwrap_or(3000);
+        let app_env = env_non_empty("APP_ENV").unwrap_or_else(|| "development".to_string());
+        let host = match env_non_empty("HOST") {
+            Some(raw) => match raw.parse::<IpAddr>() {
+                Ok(addr) => addr,
+                Err(_) => {
+                    tracing::warn!(host = %raw, "Invalid HOST value, falling back to 127.0.0.1");
+                    IpAddr::V4(Ipv4Addr::LOCALHOST)
+                }
+            },
+            None => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        };
+        let port = match env_non_empty("PORT") {
+            Some(raw) => match raw.parse::<u16>() {
+                Ok(p) => p,
+                Err(_) => {
+                    tracing::warn!(port = %raw, "Invalid PORT value, falling back to 3000");
+                    3000
+                }
+            },
+            None => 3000,
+        };
+        let run_migrations = env_non_empty("RUN_MIGRATIONS")
+            .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no"))
+            .unwrap_or(true);
         let cors_allow_origins = parse_cors_origins(env_non_empty("CORS_ALLOW_ORIGINS"));
         let llm_api_base = env_non_empty("LLM_API_BASE")
             .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-        let llm_api_key = env::var("LLM_API_KEY").unwrap_or_default();
+        let llm_api_key = env_non_empty("LLM_API_KEY").unwrap_or_default();
         let llm_model = env_non_empty("LLM_MODEL").unwrap_or_else(|| "deepseek-chat".to_string());
         let llm_reasoning_model = env_non_empty("LLM_REASONING_MODEL");
         let llm_reasoning_api_base = env_non_empty("LLM_REASONING_API_BASE");
         let llm_reasoning_api_key = env_non_empty("LLM_REASONING_API_KEY");
-        let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let database_url = env_non_empty("DATABASE_URL").expect("DATABASE_URL must be set");
 
         Self {
             app_env,
+            host,
             port,
+            run_migrations,
             cors_allow_origins,
             llm_api_base,
             llm_api_key,
@@ -78,6 +131,10 @@ impl AppConfig {
             llm_reasoning_api_key,
             database_url,
         }
+    }
+
+    pub fn is_production(&self) -> bool {
+        self.app_env.eq_ignore_ascii_case("production")
     }
 }
 
@@ -105,11 +162,15 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(config: AppConfig, db: PgPool) -> Self {
-        let fast_provider: Arc<dyn ModelProvider> = Arc::new(LlmClient::new(
-            config.llm_api_base.clone(),
-            config.llm_api_key.clone(),
-            config.llm_model.clone(),
-        ));
+        let allow_mock = !config.is_production();
+        let fast_provider: Arc<dyn ModelProvider> = Arc::new(
+            LlmClient::new(
+                config.llm_api_base.clone(),
+                config.llm_api_key.clone(),
+                config.llm_model.clone(),
+            )
+            .with_mock_fallback(allow_mock),
+        );
 
         let mut router = ModelRouter::new(
             ModelTier::Fast,
@@ -136,13 +197,21 @@ impl AppState {
                 let reasoning_key = match &config.llm_reasoning_api_key {
                     Some(key) => key.clone(),
                     None if same_base => config.llm_api_key.clone(),
-                    None => String::new(),
+                    None => {
+                        tracing::warn!(
+                            "LLM_REASONING_API_BASE differs from LLM_API_BASE without LLM_REASONING_API_KEY"
+                        );
+                        String::new()
+                    }
                 };
-                Arc::new(LlmClient::new(
-                    reasoning_api_base.to_string(),
-                    reasoning_key,
-                    reasoning_model.to_string(),
-                ))
+                Arc::new(
+                    LlmClient::new(
+                        reasoning_api_base.to_string(),
+                        reasoning_key,
+                        reasoning_model.to_string(),
+                    )
+                    .with_mock_fallback(allow_mock),
+                )
             };
 
             router = router
@@ -238,7 +307,12 @@ mod tests {
     fn cors_origin_parser_defaults_and_trims() {
         assert_eq!(
             parse_cors_origins(None),
-            vec!["http://localhost:3000", "http://127.0.0.1:3000"]
+            vec![
+                "http://localhost:3000",
+                "http://127.0.0.1:3000",
+                "http://localhost:3001",
+                "http://127.0.0.1:3001"
+            ]
         );
         assert_eq!(
             parse_cors_origins(Some(
@@ -246,6 +320,29 @@ mod tests {
             )),
             vec!["http://localhost:3001", "https://app.example.com"]
         );
+    }
+
+    #[test]
+    fn app_config_debug_redacts_secrets() {
+        let cfg = AppConfig {
+            app_env: "production".to_string(),
+            host: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            port: 3000,
+            run_migrations: true,
+            cors_allow_origins: vec!["https://app.example.com".to_string()],
+            llm_api_base: "https://api.deepseek.com/v1".to_string(),
+            llm_api_key: "sk-super-secret".to_string(),
+            llm_model: "deepseek-chat".to_string(),
+            llm_reasoning_model: None,
+            llm_reasoning_api_base: None,
+            llm_reasoning_api_key: Some("sk-reasoning-secret".to_string()),
+            database_url: "postgres://user:dbpass@localhost:5432/db".to_string(),
+        };
+        let rendered = format!("{cfg:?}");
+        assert!(!rendered.contains("sk-super-secret"));
+        assert!(!rendered.contains("sk-reasoning-secret"));
+        assert!(!rendered.contains("dbpass"));
+        assert!(rendered.contains("[REDACTED]"));
     }
 
     #[tokio::test]
@@ -275,7 +372,9 @@ mod tests {
         let state = AppState::new(
             AppConfig {
                 app_env: "test".to_string(),
+                host: IpAddr::V4(Ipv4Addr::LOCALHOST),
                 port: 0,
+                run_migrations: false,
                 cors_allow_origins: vec!["http://localhost:3000".to_string()],
                 llm_api_base: "https://api.deepseek.com/v1".to_string(),
                 llm_api_key: "sk-fast-secret".to_string(),
@@ -334,7 +433,9 @@ mod tests {
         let state = AppState::new(
             AppConfig {
                 app_env: "test".to_string(),
+                host: IpAddr::V4(Ipv4Addr::LOCALHOST),
                 port: 0,
+                run_migrations: false,
                 cors_allow_origins: vec!["http://localhost:3000".to_string()],
                 llm_api_base: format!("http://{addr}/"),
                 llm_api_key: "sk-shared-key".to_string(),

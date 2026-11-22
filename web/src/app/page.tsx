@@ -16,16 +16,14 @@ import {
   AlertCircle,
   FileCode2,
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
 import { TechReportCard } from "@/components/TechReportCard";
-import {
-  api,
-  streamConversationChat,
-} from "@/lib/api";
+import { api, streamConversationChat } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import type {
   Conversation,
   Message,
@@ -39,9 +37,8 @@ export default function WorkspacePage() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
-  const [, setModelsInfo] = useState<ModelsInfo | null>(null);
+  const [modelsInfo, setModelsInfo] = useState<ModelsInfo | null>(null);
   const [selectedTier, setSelectedTier] = useState<ModelTier>("fast");
-  const [selectedModel, setSelectedModel] = useState<string>("");
   const [deepAnalysisMode, setDeepAnalysisMode] = useState(false);
 
   const [isStreaming, setIsStreaming] = useState(false);
@@ -49,8 +46,38 @@ export default function WorkspacePage() {
   const [structuredReport, setStructuredReport] = useState<TechReport | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const abortControllerRef = useRef<AbortController | null>(null);
+  const streamAbortRef = useRef<AbortController | null>(null);
+  const messagesAbortRef = useRef<AbortController | null>(null);
+  const analyzeAbortRef = useRef<AbortController | null>(null);
+  const skipNextLoadIdRef = useRef<string | null>(null);
+  const activeIdRef = useRef<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    activeIdRef.current = activeId;
+  }, [activeId]);
+
+  const abortActiveRequests = useCallback(() => {
+    if (streamAbortRef.current) {
+      streamAbortRef.current.abort();
+      streamAbortRef.current = null;
+      setIsStreaming(false);
+    }
+    if (analyzeAbortRef.current) {
+      analyzeAbortRef.current.abort();
+      analyzeAbortRef.current = null;
+      setIsAnalyzing(false);
+    }
+  }, []);
+
+  // Abort all in-flight streams/fetches when unmounting
+  useEffect(() => {
+    return () => {
+      streamAbortRef.current?.abort();
+      messagesAbortRef.current?.abort();
+      analyzeAbortRef.current?.abort();
+    };
+  }, []);
 
   // Auto-scroll to bottom
   const scrollToBottom = () => {
@@ -61,26 +88,34 @@ export default function WorkspacePage() {
     scrollToBottom();
   }, [messages, structuredReport, isStreaming]);
 
-  const loadConversations = useCallback(async () => {
+  const loadConversations = useCallback(async (signal?: AbortSignal) => {
     try {
-      const list = await api.listConversations();
+      const list = await api.listConversations(signal);
+      if (signal?.aborted) return;
       setConversations(list);
       if (list.length > 0) {
         setActiveId((prev) => prev ?? list[0].id);
       }
     } catch (err: unknown) {
+      if (signal?.aborted) return;
       const msg = err instanceof Error ? err.message : String(err);
       setErrorMsg(`获取会话列表失败: ${msg}`);
     }
   }, []);
 
   const loadMessages = useCallback(async (convId: string) => {
+    messagesAbortRef.current?.abort();
+    const controller = new AbortController();
+    messagesAbortRef.current = controller;
+
     try {
       setErrorMsg(null);
-      const history = await api.listMessages(convId);
+      const history = await api.listMessages(convId, 50, controller.signal);
+      if (controller.signal.aborted) return;
       setMessages(history);
       setStructuredReport(null);
     } catch (err: unknown) {
+      if (controller.signal.aborted) return;
       const msg = err instanceof Error ? err.message : String(err);
       setErrorMsg(`加载消息历史失败: ${msg}`);
     }
@@ -88,31 +123,46 @@ export default function WorkspacePage() {
 
   // Load models metadata and conversation list on mount
   useEffect(() => {
+    const controller = new AbortController();
     api
-      .getModels()
+      .getModels(controller.signal)
       .then((info) => {
+        if (controller.signal.aborted) return;
         setModelsInfo(info);
         setSelectedTier(info.default_tier);
-        if (info.models.length > 0) {
-          setSelectedModel(info.models[0]);
-        }
       })
-      .catch((err) => console.warn("Could not fetch models metadata:", err));
+      .catch((err) => {
+        if (!controller.signal.aborted) {
+          console.warn("Could not fetch models metadata:", err);
+        }
+      });
 
-    void loadConversations();
+    void loadConversations(controller.signal);
+    return () => controller.abort();
   }, [loadConversations]);
 
-  // When active conversation changes, load its message history
+  // When active conversation changes, load its message history (unless just auto-created)
   useEffect(() => {
-    if (activeId) {
-      void loadMessages(activeId);
+    if (!activeId) return;
+    if (skipNextLoadIdRef.current === activeId) {
+      skipNextLoadIdRef.current = null;
+      return;
     }
+    void loadMessages(activeId);
   }, [activeId, loadMessages]);
 
+  const handleSelectConversation = (convId: string) => {
+    if (convId === activeId) return;
+    abortActiveRequests();
+    setActiveId(convId);
+  };
+
   const handleNewConversation = async () => {
+    abortActiveRequests();
     try {
       setErrorMsg(null);
       const conv = await api.createConversation();
+      skipNextLoadIdRef.current = conv.id;
       setConversations((prev) => [conv, ...prev]);
       setActiveId(conv.id);
       setMessages([]);
@@ -125,15 +175,24 @@ export default function WorkspacePage() {
 
   const handleDeleteConversation = async (e: React.MouseEvent, convId: string) => {
     e.stopPropagation();
+    if (activeIdRef.current === convId) {
+      abortActiveRequests();
+    }
     try {
       await api.deleteConversation(convId);
-      const updated = conversations.filter((c) => c.id !== convId);
-      setConversations(updated);
-      if (activeId === convId) {
-        const nextId = updated.length > 0 ? updated[0].id : null;
-        setActiveId(nextId);
-        if (!nextId) {
+      let nextActive: string | null | undefined;
+      setConversations((prev) => {
+        const updated = prev.filter((c) => c.id !== convId);
+        if (activeIdRef.current === convId) {
+          nextActive = updated.length > 0 ? updated[0].id : null;
+        }
+        return updated;
+      });
+      if (nextActive !== undefined) {
+        setActiveId(nextActive);
+        if (nextActive === null) {
           setMessages([]);
+          setStructuredReport(null);
         }
       }
     } catch (err: unknown) {
@@ -143,9 +202,9 @@ export default function WorkspacePage() {
   };
 
   const handleStopGeneration = () => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
+    if (streamAbortRef.current) {
+      streamAbortRef.current.abort();
+      streamAbortRef.current = null;
     }
     setIsStreaming(false);
   };
@@ -159,18 +218,29 @@ export default function WorkspacePage() {
 
     // Generative UI Mode: Structured TechReport Analysis
     if (deepAnalysisMode) {
+      analyzeAbortRef.current?.abort();
+      const controller = new AbortController();
+      analyzeAbortRef.current = controller;
       setIsAnalyzing(true);
       try {
         const report = await api.analyzeTechReport(
           prompt,
-          selectedTier,
-          selectedModel || undefined
+          { tier: selectedTier },
+          controller.signal
         );
-        setStructuredReport(report);
+        if (!controller.signal.aborted) {
+          setStructuredReport(report);
+        }
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        setErrorMsg(`结构化分析失败: ${msg}`);
+        if (!controller.signal.aborted) {
+          const msg = err instanceof Error ? err.message : String(err);
+          setErrorMsg(`结构化分析失败: ${msg}`);
+          setInput(prompt);
+        }
       } finally {
+        if (analyzeAbortRef.current === controller) {
+          analyzeAbortRef.current = null;
+        }
         setIsAnalyzing(false);
       }
       return;
@@ -182,18 +252,25 @@ export default function WorkspacePage() {
       try {
         const title = prompt.length > 20 ? prompt.slice(0, 20) + "..." : prompt;
         const newConv = await api.createConversation(title);
+        // Prevent the activeId useEffect from racing with the optimistic bubbles & SSE stream
+        skipNextLoadIdRef.current = newConv.id;
+        activeIdRef.current = newConv.id;
         setConversations((prev) => [newConv, ...prev]);
         setActiveId(newConv.id);
         currentConvId = newConv.id;
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         setErrorMsg(`创建会话失败: ${msg}`);
+        setInput(prompt);
         return;
       }
     }
 
+    const userMsgId = `temp-user-${Date.now()}`;
+    const assistantMsgId = `temp-assistant-${Date.now()}`;
+
     const optimisticUserMessage: Message = {
-      id: "temp-user-" + Date.now(),
+      id: userMsgId,
       conversation_id: currentConvId,
       role: "user",
       content: prompt,
@@ -202,7 +279,7 @@ export default function WorkspacePage() {
     };
 
     const optimisticAssistantMessage: Message = {
-      id: "temp-assistant-" + Date.now(),
+      id: assistantMsgId,
       conversation_id: currentConvId,
       role: "assistant",
       content: "",
@@ -214,7 +291,8 @@ export default function WorkspacePage() {
     setIsStreaming(true);
 
     const controller = new AbortController();
-    abortControllerRef.current = controller;
+    streamAbortRef.current = controller;
+    let receivedAnyDelta = false;
 
     try {
       await streamConversationChat(
@@ -222,59 +300,59 @@ export default function WorkspacePage() {
         prompt,
         {
           tier: selectedTier,
-          model: selectedModel || undefined,
           signal: controller.signal,
         },
         {
           onDelta: (chunk) => {
-            setMessages((prev) => {
-              const next = [...prev];
-              const last = next[next.length - 1];
-              if (last && last.role === "assistant") {
-                next[next.length - 1] = {
-                  ...last,
-                  content: last.content + chunk,
-                };
-              }
-              return next;
-            });
+            if (activeIdRef.current !== currentConvId) return;
+            receivedAnyDelta = true;
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantMsgId ? { ...m, content: m.content + chunk } : m
+              )
+            );
           },
           onDone: (messageId) => {
-            setIsStreaming(false);
-            abortControllerRef.current = null;
+            if (activeIdRef.current !== currentConvId) return;
             if (messageId) {
-              setMessages((prev) => {
-                const next = [...prev];
-                const last = next[next.length - 1];
-                if (last && last.role === "assistant") {
-                  next[next.length - 1] = {
-                    ...last,
-                    id: messageId,
-                  };
-                }
-                return next;
-              });
+              setMessages((prev) =>
+                prev.map((m) => (m.id === assistantMsgId ? { ...m, id: messageId } : m))
+              );
             }
           },
           onError: (err) => {
-            setIsStreaming(false);
-            abortControllerRef.current = null;
+            if (activeIdRef.current !== currentConvId) return;
             setErrorMsg(`流式输出异常: ${err.message}`);
+            if (!receivedAnyDelta) {
+              setMessages((prev) =>
+                prev.filter((m) => m.id !== userMsgId && m.id !== assistantMsgId)
+              );
+              setInput(prompt);
+            }
           },
         }
       );
     } catch {
+      // onError callback already reported the error; cleanup happens in finally
+    } finally {
+      if (streamAbortRef.current === controller) {
+        streamAbortRef.current = null;
+      }
       setIsStreaming(false);
-      abortControllerRef.current = null;
     }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.nativeEvent.isComposing || e.keyCode === 229) {
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      handleSend();
+      void handleSend();
     }
   };
+
+  const reasoningAvailable = modelsInfo === null || Boolean(modelsInfo.tiers.reasoning);
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-background text-foreground">
@@ -308,23 +386,25 @@ export default function WorkspacePage() {
                 return (
                   <div
                     key={conv.id}
-                    onClick={() => setActiveId(conv.id)}
-                    className={`group flex cursor-pointer items-center justify-between rounded-md px-3 py-2 text-xs transition-colors ${
+                    className={`group flex items-center justify-between rounded-md px-1.5 py-1 text-xs transition-colors ${
                       isActive
                         ? "bg-accent text-accent-foreground font-medium"
                         : "hover:bg-muted/80 text-muted-foreground"
                     }`}
                   >
-                    <div className="flex items-center gap-2 truncate">
+                    <button
+                      type="button"
+                      onClick={() => handleSelectConversation(conv.id)}
+                      className="flex min-w-0 flex-1 items-center gap-2 px-1.5 py-1 text-left"
+                    >
                       <MessageSquare className="h-3.5 w-3.5 shrink-0 opacity-70" />
-                      <span className="truncate">
-                        {conv.title || "新对话"}
-                      </span>
-                    </div>
+                      <span className="truncate">{conv.title || "新对话"}</span>
+                    </button>
                     <Button
                       size="icon"
                       variant="ghost"
-                      className="h-6 w-6 opacity-0 transition-opacity group-hover:opacity-100"
+                      aria-label={`删除会话 ${conv.title || "新对话"}`}
+                      className="h-6 w-6 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
                       onClick={(e) => handleDeleteConversation(e, conv.id)}
                     >
                       <Trash2 className="h-3 w-3 text-destructive" />
@@ -338,15 +418,15 @@ export default function WorkspacePage() {
 
         {/* Navigation to AST Document Parser */}
         <div className="border-t p-2">
-          <Link href="/documents" className="block">
-            <Button
-              size="sm"
-              variant="ghost"
-              className="w-full justify-start gap-2 text-xs text-muted-foreground hover:text-foreground"
-            >
-              <FileCode2 className="h-3.5 w-3.5 text-primary" />
-              <span>文档与代码 AST 解析</span>
-            </Button>
+          <Link
+            href="/documents"
+            className={cn(
+              buttonVariants({ size: "sm", variant: "ghost" }),
+              "w-full justify-start gap-2 text-xs text-muted-foreground hover:text-foreground"
+            )}
+          >
+            <FileCode2 className="h-3.5 w-3.5 text-primary" />
+            <span>文档与代码 AST 解析</span>
           </Link>
         </div>
 
@@ -383,6 +463,12 @@ export default function WorkspacePage() {
                 size="sm"
                 variant={selectedTier === "reasoning" ? "default" : "outline"}
                 className="h-7 gap-1 px-2.5 text-xs"
+                disabled={!reasoningAvailable}
+                title={
+                  reasoningAvailable
+                    ? modelsInfo?.tiers.reasoning ?? "推理模型"
+                    : "后端未配置 LLM_REASONING_MODEL"
+                }
                 onClick={() => setSelectedTier("reasoning")}
               >
                 <Cpu className="h-3 w-3" />
@@ -410,7 +496,10 @@ export default function WorkspacePage() {
         <div className="flex-1 overflow-y-auto p-4 sm:p-6">
           <div className="mx-auto max-w-3xl space-y-4">
             {errorMsg && (
-              <div className="flex items-center gap-2 rounded-lg border border-destructive/20 bg-destructive/10 p-3 text-xs text-destructive">
+              <div
+                role="alert"
+                className="flex items-center gap-2 rounded-lg border border-destructive/20 bg-destructive/10 p-3 text-xs text-destructive"
+              >
                 <AlertCircle className="h-4 w-4 shrink-0" />
                 <span>{errorMsg}</span>
               </div>
@@ -418,18 +507,19 @@ export default function WorkspacePage() {
 
             {messages.length === 0 && !structuredReport ? (
               <div className="flex flex-col items-center justify-center py-20 text-center">
-                <Bot className="h-10 w-10 text-muted-foreground/40 mb-3" />
+                <Bot className="mb-3 h-10 w-10 text-muted-foreground/40" />
                 <h3 className="text-sm font-semibold text-foreground">
                   欢迎使用 Rust + Next.js 全栈 AI 工作台
                 </h3>
-                <p className="mt-1 text-xs text-muted-foreground max-w-sm">
+                <p className="mt-1 max-w-sm text-xs text-muted-foreground">
                   支持毫秒级 SSE Token 流式打字机输出、即时断开与中止保护，以及强类型 JSON Schema 结构化卡片分析。
                 </p>
               </div>
             ) : null}
 
-            {messages.map((msg) => {
+            {messages.map((msg, idx) => {
               const isUser = msg.role === "user";
+              const isLatestAssistant = !isUser && idx === messages.length - 1;
               return (
                 <div
                   key={msg.id}
@@ -450,7 +540,9 @@ export default function WorkspacePage() {
                     {isUser ? (
                       <div className="whitespace-pre-wrap">{msg.content}</div>
                     ) : (
-                      <MarkdownMessage content={msg.content || (isStreaming ? "▍" : "")} />
+                      <MarkdownMessage
+                        content={msg.content || (isStreaming && isLatestAssistant ? "▍" : "")}
+                      />
                     )}
                   </div>
                   {isUser && (
@@ -478,6 +570,7 @@ export default function WorkspacePage() {
           <div className="mx-auto max-w-3xl">
             <div className="relative rounded-xl border bg-card shadow-xs focus-within:ring-1 focus-within:ring-ring">
               <Textarea
+                aria-label="聊天消息输入框"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}

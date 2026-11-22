@@ -1,20 +1,22 @@
 # ------------------------------------------------------------------------------
-# Stage 1: Build the Rust backend binary with cached dependencies
+# Stage 1: Build the Rust backend binary
 # ------------------------------------------------------------------------------
-FROM rust:1.85-slim-bookworm AS builder
+FROM rust:1.88-slim-bookworm AS builder
 
 WORKDIR /app
 
-# Install build dependencies including OpenSSL/pkg-config if needed by crates
+# Install C toolchain needed for compiling tree-sitter C grammars
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
-    libssl-dev \
+    gcc \
+    libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy workspace manifests
 COPY Cargo.toml Cargo.lock ./
 COPY crates/core/Cargo.toml crates/core/Cargo.toml
 COPY crates/db/Cargo.toml crates/db/Cargo.toml
+COPY crates/parser/Cargo.toml crates/parser/Cargo.toml
 COPY crates/server/Cargo.toml crates/server/Cargo.toml
 
 # Copy source code and offline SQLx metadata
@@ -46,7 +48,9 @@ USER appuser
 EXPOSE 3000
 
 ENV APP_ENV=production \
+    HOST=0.0.0.0 \
     PORT=3000 \
+    RUN_MIGRATIONS=true \
     RUST_LOG=info
 
 HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
