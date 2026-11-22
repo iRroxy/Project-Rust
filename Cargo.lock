@@ -68,6 +68,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tiktoken-rs",
+ "tokio",
  "tracing",
  "tree-sitter",
  "tree-sitter-python",

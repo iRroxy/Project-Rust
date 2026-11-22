@@ -102,7 +102,7 @@
     2. 生成切块 JSON Schema 并支持反序列化检验。
   - **验收 Commit**：`git commit -m "feat(parser): define DocumentChunk schema with metadata and offsets"`
 
-- [ ] **Day 42：构建异步背压切块流水线（`tokio::sync::mpsc` 异步通道）**
+- [x] **Day 42：构建异步背压切块流水线（`tokio::sync::mpsc` 异步通道）**
   - **10 min 速览**：掌握通过有界通道（Bounded Channel）实现流式切块与背压（Backpressure），防止超大文件爆内存。
   - **30 min 实战**：
     1. 使用 `tokio::sync::mpsc::channel(128)` 搭建管道。

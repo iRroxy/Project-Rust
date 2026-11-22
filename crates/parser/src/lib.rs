@@ -5,6 +5,7 @@ pub mod document_chunk;
 pub mod error;
 pub mod fingerprint;
 pub mod markdown;
+pub mod pipeline;
 pub mod scanner;
 pub mod tokenizer;
 
@@ -20,5 +21,8 @@ pub use fingerprint::{
     DiffCalculator, DiffSummary, DocumentFingerprint, UnitFingerprint, hash_bytes, hash_text,
 };
 pub use markdown::{CodeBlock, MarkdownParser, MarkdownSection, ParsedMarkdown};
+pub use pipeline::{
+    ChunkPipeline, ChunkStream, FileInput, PipelineConfig, PipelineItem, PipelineStats,
+};
 pub use scanner::{DocumentContent, ParsedDocument, RepositoryScanner, ScanConfig, ScanReport};
 pub use tokenizer::{TokenCounter, TokenizerEncoding};

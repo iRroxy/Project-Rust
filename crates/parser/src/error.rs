@@ -18,6 +18,9 @@ pub enum ParseError {
     #[error("chunk schema validation failed: {0}")]
     SchemaValidation(String),
 
+    #[error("chunking pipeline error: {0}")]
+    Pipeline(String),
+
     #[error("I/O error while reading source: {0}")]
     Io(#[from] std::io::Error),
 }
