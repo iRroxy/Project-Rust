@@ -15,6 +15,9 @@ pub enum ParseError {
     #[error("BPE tokenizer decode error: {0}")]
     TokenizerDecode(String),
 
+    #[error("chunk schema validation failed: {0}")]
+    SchemaValidation(String),
+
     #[error("I/O error while reading source: {0}")]
     Io(#[from] std::io::Error),
 }

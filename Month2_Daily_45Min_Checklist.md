@@ -95,7 +95,7 @@
     2. 确保完整函数（Function）或结构体（Struct）作为最小独立切块，并附加所在文件路径与模块声明。
   - **验收 Commit**：`git commit -m "feat(parser): implement AST-aware code chunker for functions and structs"`
 
-- [ ] **Day 41：切块元数据模型与强类型 Schema 定义**
+- [x] **Day 41：切块元数据模型与强类型 Schema 定义**
   - **10 min 速览**：设计 RAG 检索可追溯所需的元数据字段（File ID、Breadcrumbs、Byte Offsets、Token Count、Hash）。
   - **30 min 实战**：
     1. 定义 `pub struct DocumentChunk` 强类型结构，集成 `serde` 与 `schemars`。

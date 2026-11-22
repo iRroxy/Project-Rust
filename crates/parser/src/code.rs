@@ -1,10 +1,11 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tree_sitter::{Language, Node, Parser};
 
 use crate::error::ParseError;
 
 /// Programming languages supported by the AST code parser.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SupportedLanguage {
     Rust,
@@ -45,7 +46,7 @@ impl SupportedLanguage {
 }
 
 /// Kind of structural symbol extracted from an AST.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SymbolKind {
     Function,

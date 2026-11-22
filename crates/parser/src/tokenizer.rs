@@ -1,5 +1,6 @@
 use std::sync::OnceLock;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tiktoken_rs::{CoreBPE, Rank, cl100k_base, o200k_base};
 
@@ -9,7 +10,7 @@ static CL100K_BPE: OnceLock<CoreBPE> = OnceLock::new();
 static O200K_BPE: OnceLock<CoreBPE> = OnceLock::new();
 
 /// Supported Byte-Pair Encoding (BPE) vocabularies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TokenizerEncoding {
     /// OpenAI `cl100k_base` (GPT-4, `text-embedding-3-small`, `text-embedding-3-large`).
