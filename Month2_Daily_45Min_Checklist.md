@@ -128,7 +128,7 @@
 
 **本周目标**：在 PostgreSQL 中部署 `pgvector` 扩展，编写纯 Rust 异步并发向量化管道，建立高吞吐向量入库与毫秒级余弦检索。
 
-- [ ] **Day 45：数据库启用 `pgvector` 扩展并编写 SQLx 迁移脚本**
+- [x] **Day 45：数据库启用 `pgvector` 扩展并编写 SQLx 迁移脚本**
   - **10 min 速览**：了解 `pgvector` 的 `vector` 数据类型与 HNSW (Hierarchical Navigable Small World) 图索引原理。
   - **30 min 实战**：
     1. 更新 `docker-compose.yml` 使用 `pgvector/pgvector:pg17` 镜像。
