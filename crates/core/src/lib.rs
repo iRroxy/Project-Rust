@@ -1,4 +1,5 @@
 pub mod embedding;
+pub mod embedding_pipeline;
 pub mod llm;
 pub mod provider;
 pub mod report;
@@ -6,6 +7,9 @@ pub mod report;
 pub use embedding::{
     EmbeddingError, EmbeddingProvider, MockEmbeddingProvider, OllamaEmbeddingProvider,
     OpenAiEmbeddingProvider,
+};
+pub use embedding_pipeline::{
+    BatchEmbeddingConfig, BatchEmbeddingPipeline, EmbeddingPipelineStats,
 };
 pub use llm::LlmClient;
 pub use provider::{

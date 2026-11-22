@@ -143,7 +143,7 @@
     2. 实现 `OpenAiEmbeddingProvider` 与 `OllamaEmbeddingProvider`。
   - **验收 Commit**：`git commit -m "feat(core): abstract EmbeddingProvider trait with OpenAI and Ollama implementations"`
 
-- [ ] **Day 47：基于 `tokio::sync::Semaphore` 编写严格限流的批量 Embedding 管道**
+- [x] **Day 47：基于 `tokio::sync::Semaphore` 编写严格限流的批量 Embedding 管道**
   - **10 min 速览**：学习使用信号量限制上游并发，防止触发模型 API 的 Rate Limit (429 Too Many Requests)。
   - **30 min 实战**：
     1. 编写 `BatchEmbeddingPipeline`，按最大批量（如每次 16 条）打包 Chunks。
