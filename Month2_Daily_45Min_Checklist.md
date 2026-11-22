@@ -164,7 +164,7 @@
     2. 编写单元/集成测试：插入测试向量并验证余弦近邻排序结果正确。
   - **验收 Commit**：`git commit -m "feat(db): implement vector cosine similarity search with score threshold"`
 
-- [ ] **Day 50：在 `crates/server` 中开辟 `POST /api/search/vector` 语义检索端点**
+- [x] **Day 50：在 `crates/server` 中开辟 `POST /api/search/vector` 语义检索端点**
   - **10 min 速览**：将自然语言 Query 向量化后直达数据库检索。
   - **30 min 实战**：
     1. 编写 `POST /api/search/vector` Handler：接收 `{"query": "...", "top_k": 5}`。

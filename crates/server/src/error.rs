@@ -1,3 +1,5 @@
+use ai_core::EmbeddingError;
+use ai_db::ChunkRepoError;
 use axum::{
     Json,
     http::StatusCode,
@@ -21,6 +23,56 @@ pub enum AppError {
 
     #[error("Database error")]
     Database(#[from] sqlx::Error),
+}
+
+impl From<EmbeddingError> for AppError {
+    fn from(err: EmbeddingError) -> Self {
+        match err {
+            EmbeddingError::MissingApiKey => {
+                Self::ServiceUnavailable("embedding provider API key is not configured".to_string())
+            }
+            EmbeddingError::RateLimited { .. } => {
+                tracing::warn!(error = %err, "Embedding provider rate limited request");
+                Self::ServiceUnavailable(
+                    "embedding provider is rate limited; please retry shortly".to_string(),
+                )
+            }
+            EmbeddingError::InvalidInput(msg) => Self::BadRequest(msg),
+            EmbeddingError::DimensionMismatch {
+                expected, actual, ..
+            } => Self::BadRequest(format!(
+                "embedding dimension mismatch: expected {expected}, got {actual}"
+            )),
+            EmbeddingError::Network(ref detail) => {
+                tracing::error!(error = %detail, "Network error calling embedding provider");
+                Self::ServiceUnavailable(
+                    "embedding provider is temporarily unreachable; please retry".to_string(),
+                )
+            }
+            EmbeddingError::Upstream {
+                status,
+                ref message,
+            } if matches!(status, 408 | 500..=599) => {
+                tracing::error!(status, error = %message, "Transient upstream embedding failure");
+                Self::ServiceUnavailable(
+                    "embedding provider is temporarily unavailable; please retry".to_string(),
+                )
+            }
+            other => Self::Internal(other.into()),
+        }
+    }
+}
+
+impl From<ChunkRepoError> for AppError {
+    fn from(err: ChunkRepoError) -> Self {
+        match err {
+            ChunkRepoError::InvalidChunk { .. }
+            | ChunkRepoError::InvalidQuery(_)
+            | ChunkRepoError::DimensionMismatch { .. }
+            | ChunkRepoError::NonFiniteEmbedding { .. } => Self::BadRequest(err.to_string()),
+            ChunkRepoError::Database(db_err) => Self::Database(db_err),
+        }
+    }
 }
 
 #[derive(Serialize)]

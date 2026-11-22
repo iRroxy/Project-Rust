@@ -1,6 +1,7 @@
 mod conversations;
 mod documents;
 mod error;
+mod search;
 mod state;
 mod stream;
 
@@ -224,6 +225,7 @@ pub fn build_app(state: AppState) -> Router {
             "/api/documents/parse-batch",
             post(documents::parse_documents_batch).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
         )
+        .route("/api/search/vector", post(search::vector_search))
         .route("/api/stream-demo", get(stream::demo))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
@@ -266,6 +268,7 @@ mod tests {
             llm_reasoning_model: reasoning_model.map(str::to_string),
             llm_reasoning_api_base: None,
             llm_reasoning_api_key: None,
+            embedding: crate::state::EmbeddingConfig::default(),
             database_url: "postgres://test:test@localhost:5432/test".to_string(),
         }
     }

@@ -231,6 +231,7 @@ mod tests {
             llm_reasoning_model: None,
             llm_reasoning_api_base: None,
             llm_reasoning_api_key: None,
+            embedding: crate::state::EmbeddingConfig::default(),
             database_url: String::new(),
         };
         build_app(AppState::new(config, pool))
@@ -341,6 +342,7 @@ mod tests {
             llm_reasoning_model: Some("flagship-model".to_string()),
             llm_reasoning_api_base: Some(format!("http://{reasoning_addr}")),
             llm_reasoning_api_key: Some("reasoning-key".to_string()),
+            embedding: crate::state::EmbeddingConfig::default(),
             database_url: String::new(),
         };
         let app = build_app(AppState::new(config, pool.clone()));

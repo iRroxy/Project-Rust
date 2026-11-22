@@ -337,6 +337,7 @@ mod tests {
             llm_reasoning_model: None,
             llm_reasoning_api_base: None,
             llm_reasoning_api_key: None,
+            embedding: crate::state::EmbeddingConfig::default(),
             database_url: "postgres://test:test@localhost:5432/test".to_string(),
         };
         let db = ai_db::connect_lazy(&config.database_url).unwrap();
