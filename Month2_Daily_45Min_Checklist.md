@@ -150,7 +150,7 @@
     2. 用 `Arc<Semaphore>` 限制最大并发并发请求数（如 5 并发），内建指数退避重试（Exponential Backoff）。
   - **验收 Commit**：`git commit -m "feat(core): implement rate-limited batch embedding pipeline with semaphore"`
 
-- [ ] **Day 48：编写 `crates/db` 批量向量 Upsert 仓储层方法**
+- [x] **Day 48：编写 `crates/db` 批量向量 Upsert 仓储层方法**
   - **10 min 速览**：了解 SQLx 中使用 UNNEST 或批量 VALUES 高效插入向量数据。
   - **30 min 实战**：
     1. 在 `crates/db` 中编写 `ChunkRepository`。

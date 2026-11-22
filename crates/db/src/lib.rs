@@ -1,7 +1,12 @@
+pub mod chunks;
 pub mod conversations;
 pub mod message;
 pub mod models;
 
+pub use chunks::{
+    BatchUpsertSummary, ChunkRepoError, ChunkRepository, DEFAULT_UPSERT_BATCH_SIZE,
+    EMBEDDING_DIMENSIONS, NewDocumentChunk, StoredDocumentChunk, format_pgvector,
+};
 pub use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use std::time::Duration;
