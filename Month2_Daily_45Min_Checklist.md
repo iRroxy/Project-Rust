@@ -88,7 +88,7 @@
     3. 编写切块测试用例验证无边界撕裂。
   - **验收 Commit**：`git commit -m "feat(parser): implement hierarchical markdown semantic chunker"`
 
-- [ ] **Day 40：编写代码感知切块器 (`CodeChunker`)：基于 AST 保持函数完整性**
+- [x] **Day 40：编写代码感知切块器 (`CodeChunker`)：基于 AST 保持函数完整性**
   - **10 min 速览**：了解为什么代码 RAG 不能跨函数随意截断（破坏语法上下文导致大模型理解失真）。
   - **30 min 实战**：
     1. 结合 Day 32 的 `tree-sitter` 符号边界，实现 `CodeChunker`。
