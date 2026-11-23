@@ -171,7 +171,7 @@
     2. 后端先调用 `EmbeddingProvider` 生成 query 向量，再调用 `ChunkRepository` 检索相似段落并返回 JSON。
   - **验收 Commit**：`git commit -m "feat(server): add vector semantic search API endpoint"`
 
-- [ ] **Day 51：第七周全流程集成测试：验证「解析 $\rightarrow$ 切块 $\rightarrow$ 嵌入 $\rightarrow$ 向量检索」闭环**
+- [x] **Day 51：第七周全流程集成测试：验证「解析 $\rightarrow$ 切块 $\rightarrow$ 嵌入 $\rightarrow$ 向量检索」闭环**
   - **45 min 实战**：
     1. 编写完整集成测试：上传一段示例文档，自动切块并生成向量入库。
     2. 输入提问，验证返回的相似段落精确命中文档核心事实。

@@ -187,6 +187,10 @@ pub fn build_app(state: AppState) -> Router {
     let llm_routes = Router::new()
         .route("/api/analyze", post(analyze))
         .route("/api/chat", post(chat))
+        .route(
+            "/api/documents/ingest",
+            post(documents::ingest_document).layer(DefaultBodyLimit::max(4 * 1024 * 1024)),
+        )
         .route("/api/conversations/{id}/chat", post(conversations::chat))
         .route(
             "/api/conversations/{id}/chat/stream",
